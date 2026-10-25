@@ -92,6 +92,7 @@ class MainActivity : AppCompatActivity() {
         // 起動時に、重複した保存待ちを自動で取り消し、止まっていた保存待ちを再開する
         updateStatusButton()
         tidyUp(showResult = false)
+        askBatteryExemptionOnce()
 
         if (!Prefs.driveEnabled(this) && savedInstanceState == null) {
             Toast.makeText(this, "「設定」からGoogleドライブ連携を設定できます（未設定の場合は本体のDownload/FANZAに保存）", Toast.LENGTH_LONG).show()
@@ -463,6 +464,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------------------------------------------------------------- バッテリー最適化
+
+    /**
+     * バッテリー最適化の対象から外れていると、アップデート直後や画面オフ中でも
+     * Androidに止められずに保存処理を続けられる（外れていないと約10分ごとに中断される）。
+     */
+    private fun isBatteryExempt(): Boolean =
+        getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+
+    @SuppressLint("BatteryLife")
+    private fun requestBatteryExemption() {
+        runCatching {
+            startActivity(
+                android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(android.net.Uri.parse("package:$packageName"))
+            )
+        }.onFailure {
+            startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+    }
+
+    private fun askBatteryExemptionOnce() {
+        val sp = getSharedPreferences("fanza_prefs", MODE_PRIVATE)
+        if (isBatteryExempt() || sp.getBoolean("battery_asked", false)) return
+        sp.edit().putBoolean("battery_asked", true).apply()
+        AlertDialog.Builder(this)
+            .setTitle("バックグラウンドで止まらないようにする")
+            .setMessage("大きな作品の保存を、画面を消している間やアプリのアップデート直後も止めずに続けるため、このアプリを「バッテリー最適化」の対象から外すことをおすすめします。\n\n次の画面で「許可」を押してください。（後から「設定」でも変更できます）")
+            .setPositiveButton("設定する") { _, _ -> requestBatteryExemption() }
+            .setNegativeButton("あとで", null)
+            .show()
+    }
+
     private fun updateStatusButton() {
         findViewById<Button>(R.id.btnStatus).text = if (Prefs.paused(this)) "⏸停止中" else "保存状況"
     }
@@ -473,6 +507,9 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             sb.append("⚠ 通知が許可されていません。スマホの設定→アプリ→FANZA Drive保存→通知 をONにすると、進み具合や完了が通知で分かります。\n\n")
+        }
+        if (!isBatteryExempt()) {
+            sb.append("⚠ バッテリー最適化が有効なため、画面オフ中やアップデート後に保存が中断されやすくなっています。「設定」→「バッテリー最適化を解除」がおすすめです。\n\n")
         }
         sb.append("保存先: ").append(
             when {
@@ -574,6 +611,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         v.findViewById<Button>(R.id.btnDumpPage).setOnClickListener { dumpPage(info) }
+        v.findViewById<Button>(R.id.btnBattery).apply {
+            text = if (isBatteryExempt()) "バッテリー最適化: 解除済み ✓" else "バッテリー最適化を解除（止まりにくくする）"
+            setOnClickListener { requestBatteryExemption() }
+        }
         val btnKept = v.findViewById<Button>(R.id.btnClearKept)
         btnKept.text = "失敗した作品の途中データを削除（${JobQueue.keptCount(this)}件・" +
             String.format("%.0fMB", JobQueue.keptBytes(this) / 1024.0 / 1024.0) + "）"

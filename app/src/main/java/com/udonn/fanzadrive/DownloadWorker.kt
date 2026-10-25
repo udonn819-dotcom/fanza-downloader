@@ -18,7 +18,6 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
@@ -98,7 +97,24 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 
         // 大きな作品が一度に何件も重なると空き容量が足りなくなるので、同時に処理するのは2件まで
         runCatching { setProgress(workDataOf(P_TEXT to "順番待ち（同時に2件まで処理します）", P_PERCENT to -1)) }
-        slots.withPermit { work(url, key, titleHint) }
+        // 途中まで進んでいる作品（アップデートや一時停止で止まったもの）を優先して先に再開する
+        val partial = File(JobQueue.jobDir(ctx, key), "data.bin").let { it.exists() && it.length() > 0 }
+        if (partial) {
+            resumeWaiting.incrementAndGet()
+            try {
+                slots.acquire()
+            } finally {
+                resumeWaiting.decrementAndGet()
+            }
+        } else {
+            while (resumeWaiting.get() > 0) kotlinx.coroutines.delay(1000)
+            slots.acquire()
+        }
+        try {
+            work(url, key, titleHint)
+        } finally {
+            slots.release()
+        }
     }
 
     private suspend fun work(url: String, key: String, titleHint: String?): Result {
@@ -208,10 +224,34 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         return fileName + if (drive) "（Googleドライブ）" else "（Download/FANZA）"
     }
 
-    /** ダウンロード。途中まで落としたファイルがあれば、続きから（Rangeリクエスト）再開する */
+    /**
+     * ダウンロード。途中まで落としたファイルがあれば、続きから（Rangeリクエスト）再開する。
+     * 続きからの再開は、まず前回実際にファイルを受け取ったURL（配信サーバー）で試し、
+     * ダメなら作品を押したときのURLで試す。
+     */
     private suspend fun download(url: String, out: File, state: JSONObject, saveState: () -> Unit) {
         Http.ensureAgeCheckCookie()
         val have = if (out.exists()) out.length() else 0L
+        val finalUrl = state.optString("finalUrl")
+        if (have > 0 && finalUrl.startsWith("http") && finalUrl != url) {
+            try {
+                if (downloadFrom(finalUrl, out, have, state, saveState, fallbackAllowed = true)) return
+            } catch (e: PermanentException) {
+                // 配信サーバーのURLは期限切れ。作品を押したときのURLで続きを試す
+            }
+        }
+        downloadFrom(url, out, have, state, saveState, fallbackAllowed = false)
+    }
+
+    /** @return 完了したら true。fallbackAllowed のとき、続きからに非対応なら false を返して別のURLに任せる */
+    private suspend fun downloadFrom(
+        url: String,
+        out: File,
+        have: Long,
+        state: JSONObject,
+        saveState: () -> Unit,
+        fallbackAllowed: Boolean,
+    ): Boolean {
         val builder = Request.Builder().url(url)
             .header("User-Agent", inputData.getString(KEY_UA)?.takeIf { it.isNotBlank() } ?: Http.DESKTOP_UA)
         inputData.getString(KEY_REFERER)?.takeIf { it.startsWith("http") }?.let { builder.header("Referer", it) }
@@ -219,7 +259,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 
         Http.client.newCall(builder.build()).execute().use { resp ->
             // 416 = もう全部ダウンロード済み
-            if (resp.code == 416 && have > 0 && state.optLong("total", -1) == have) return
+            if (resp.code == 416 && have > 0 && state.optLong("total", -1) == have) return true
             if (!resp.isSuccessful) {
                 val msg = "ダウンロード失敗 HTTP ${resp.code}"
                 throw if (resp.code in 400..499 && resp.code != 408 && resp.code != 429) PermanentException(msg) else IOException(msg)
@@ -227,20 +267,26 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             val body = resp.body ?: throw IOException("空の応答")
             val mime = body.contentType()?.let { "${it.type}/${it.subtype}" }.orEmpty()
             if (mime == "text/html") {
-                throw PermanentException("ファイルではなくWebページが返されました。ログインが切れている可能性があります（アプリで再ログインしてください）")
+                throw PermanentException("ファイルではなくWebページが返されました。ログインが切れているか、ダウンロードURLの期限が切れています（作品の「ダウンロードする」を押し直してください）")
             }
-            // サーバーが続きからの送信に対応していれば追記、そうでなければ最初から
             val resume = resp.code == 206 && have > 0
+            if (have > 0 && !resume && fallbackAllowed) return false
             if (!resume || !state.has("mime")) {
                 state.put("mime", mime)
-                state.put("finalUrl", resp.request.url.toString())
                 state.put("contentDisposition", resp.header("Content-Disposition").orEmpty())
             }
+            state.put("finalUrl", resp.request.url.toString())
             val length = body.contentLength()
             val total = if (length < 0) -1 else if (resume) have + length else length
             state.put("total", total)
             saveState()
 
+            // 続きから受け取れたかどうかを「保存状況」に表示する
+            val label = when {
+                resume -> "ダウンロード中（${mb(have)}の続きから再開）"
+                have > 0 -> "ダウンロード中（配信サーバーが続きからに非対応のため最初から）"
+                else -> "ダウンロード中"
+            }
             var done = if (resume) have else 0L
             body.byteStream().use { input ->
                 java.io.FileOutputStream(out, resume).use { output ->
@@ -251,11 +297,12 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                         if (n < 0) break
                         output.write(buf, 0, n)
                         done += n
-                        report("ダウンロード中", done, total)
+                        report(label, done, total)
                     }
                 }
             }
             if (total > 0 && done != total) throw IOException("ダウンロードが途中で切れました（続きから再開します）")
+            return true
         }
     }
 
@@ -311,6 +358,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
     companion object {
         private const val MAX_ATTEMPTS = 5
         private val slots = Semaphore(2)
+        private val resumeWaiting = java.util.concurrent.atomic.AtomicInteger(0)
         const val KEY_URL = "url"
         const val KEY_UA = "ua"
         const val KEY_REFERER = "referer"

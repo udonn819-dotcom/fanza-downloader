@@ -110,6 +110,14 @@
             android:text="購入済みページを開いたら未保存作品を自動で保存" />
 
         <Button
+            android:id="@+id/btnBattery"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="バッテリー最適化を解除" />
+
+        <Button
             android:id="@+id/btnClearHistory"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
