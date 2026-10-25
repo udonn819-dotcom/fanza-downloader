@@ -159,14 +159,31 @@ class DriveUploader(private val backend: DriveBackend) {
 
     fun existingSize(name: String): Long? = backend.existingSize(name)
 
-    fun upload(file: File, name: String, mime: String, onProgress: (Long, Long) -> Unit) {
+    /**
+     * @param savedSession 前回途中で止まったときのアップロード用URL（あれば続きから送る）
+     * @param onSession アップロード用URLを記録する（期限切れなら null）
+     * @param shouldStop 一時停止などで止めるべきとき true
+     */
+    fun upload(
+        file: File,
+        name: String,
+        mime: String,
+        savedSession: String?,
+        onSession: (String?) -> Unit,
+        shouldStop: () -> Boolean,
+        onProgress: (Long, Long) -> Unit,
+    ) {
         val total = file.length()
-        val session = backend.createSession(name, mime, total)
+        var offset = savedSession?.let { queryOffset(it, total) } ?: -1L
+        val session = if (offset >= 0) savedSession!! else {
+            offset = 0L
+            backend.createSession(name, mime, total).also(onSession)
+        }
 
         val mediaType = mime.toMediaType()
-        var offset = 0L
         var failures = 0
         while (offset < total) {
+            if (shouldStop()) throw IOException("中断されました")
             val len = minOf(CHUNK, total - offset)
             val req = Request.Builder()
                 .url(session)
@@ -179,8 +196,11 @@ class DriveUploader(private val backend: DriveBackend) {
                         resp.code == 200 || resp.code == 201 -> offset = total
                         resp.code == 308 -> offset = parseRangeEnd(resp.header("Range"))
                         resp.code in 500..599 -> throw IOException("HTTP ${resp.code}")
-                        // 404/410 はアップロード用URLの期限切れ。作業全体を最初からやり直す
-                        else -> throw UploadFailed("ドライブへのアップロード失敗 HTTP ${resp.code}: ${resp.body?.string()?.take(200)}")
+                        // 404/410 はアップロード用URLの期限切れ。次回は新しいURLで最初から送り直す
+                        else -> {
+                            onSession(null)
+                            throw UploadFailed("ドライブへのアップロード失敗 HTTP ${resp.code}: ${resp.body?.string()?.take(200)}")
+                        }
                     }
                 }
                 failures = 0

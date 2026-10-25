@@ -12,6 +12,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -24,6 +25,9 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+
+/** 予約の結果: 予約した / すでに保存待ち（重複） / 一時停止中なので再開後に処理 */
+enum class Queued { QUEUED, DUPLICATE, PAUSED }
 
 /**
  * バックグラウンドで「ダウンロード → 作品タイトルにリネーム → 保存（ドライブ／本体）」を行う。
@@ -66,44 +70,65 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val url = inputData.getString(KEY_URL) ?: return@withContext Result.failure()
-        val historyKey = inputData.getString(KEY_HISTORY) ?: url
-        label = inputData.getString(KEY_TITLE_HINT)?.takeIf { it.isNotBlank() } ?: "FANZA作品"
-        runCatching { setForeground(foregroundInfo("準備中…", null)) }
+        val key = inputData.getString(KEY_HISTORY) ?: url
+        val titleHint = inputData.getString(KEY_TITLE_HINT)?.takeIf { it.isNotBlank() }
+        label = titleHint ?: "FANZA作品"
+
+        // 重複の自動除外: 同じ作品が先に保存済みになっていたら何もしない
+        if (!inputData.getBoolean(KEY_FORCE, false) &&
+            (Prefs.isDone(ctx, key) || (titleHint != null && Prefs.isDone(ctx, "t:$titleHint")))
+        ) {
+            JobQueue.remove(ctx, key)
+            return@withContext Result.success(workDataOf(OUT_RESULT to "$label（保存済みのため重複をスキップ）"))
+        }
+        // 古いバージョンで予約された分も台帳に載せ、一時停止・アップデート後に再開できるようにする
+        if (!JobQueue.contains(ctx, key)) {
+            JobQueue.put(
+                ctx, key,
+                JSONObject().put(KEY_URL, url).put(KEY_UA, inputData.getString(KEY_UA).orEmpty())
+                    .put(KEY_REFERER, inputData.getString(KEY_REFERER).orEmpty()).put(KEY_CD, inputData.getString(KEY_CD).orEmpty())
+                    .put(KEY_CID, inputData.getString(KEY_CID).orEmpty()).put(KEY_TITLE_HINT, titleHint.orEmpty())
+                    .put(KEY_FORCE, inputData.getBoolean(KEY_FORCE, false)),
+            )
+        }
+        runCatching { setForeground(foregroundInfo("順番待ち…", null)) }
 
         // 大きな作品が一度に何件も重なると空き容量が足りなくなるので、同時に処理するのは2件まで
         runCatching { setProgress(workDataOf(P_TEXT to "順番待ち（同時に2件まで処理します）", P_PERCENT to -1)) }
-        slots.withPermit { work(url, historyKey) }
+        slots.withPermit { work(url, key, titleHint) }
     }
 
-    private suspend fun work(url: String, historyKey: String): Result {
-        val jobDir = File(ctx.noBackupFilesDir, "jobs/$id").apply { mkdirs() }
+    private suspend fun work(url: String, key: String, titleHint: String?): Result {
+        val jobDir = JobQueue.jobDir(ctx, key).apply { mkdirs() }
         return try {
             val name = process(url, jobDir)
-            Prefs.markDone(ctx, historyKey)
-            inputData.getString(KEY_TITLE_HINT)?.takeIf { it.isNotBlank() }?.let { Prefs.markDone(ctx, "t:$it") }
-            jobDir.deleteRecursively()
+            Prefs.markDone(ctx, key)
+            titleHint?.let { Prefs.markDone(ctx, "t:$it") }
+            Prefs.markDone(ctx, historyKey(url, inputData.getString(KEY_CID)))
+            JobQueue.remove(ctx, key)
             Prefs.setLastError(ctx, id.toString(), null)
             Notifier.result(ctx, progressId + 1, "保存しました", name, true)
             Result.success(workDataOf(OUT_RESULT to name))
-        } catch (e: PermanentException) {
-            fail(jobDir, e.message ?: "不明なエラー")
-        } catch (e: IOException) {
-            if (runAttemptCount < MAX_ATTEMPTS) {
-                // 少し待って自動で再試行。理由は「保存状況」画面で確認できる
-                Prefs.setLastError(ctx, id.toString(), "通信エラー（${runAttemptCount + 1}回目）: ${e.message}")
-                Result.retry()
-            } else {
-                fail(jobDir, "通信エラー: ${e.message}")
-            }
         } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
+            throw e // 一時停止・中止。途中のファイルは残して続きから再開できるようにする
         } catch (e: Exception) {
-            fail(jobDir, "予期しないエラー: ${e.javaClass.simpleName} ${e.message ?: ""}")
+            when {
+                // 一時停止やアップデートで止められた場合は、途中のファイルを残したまま終了
+                isStopped -> Result.retry()
+                e is PermanentException -> fail(key, e.message ?: "不明なエラー")
+                e is IOException && runAttemptCount < MAX_ATTEMPTS -> {
+                    // 少し待って自動で再試行（続きから）。理由は「保存状況」画面で確認できる
+                    Prefs.setLastError(ctx, id.toString(), "通信エラー（${runAttemptCount + 1}回目）: ${e.message}")
+                    Result.retry()
+                }
+                e is IOException -> fail(key, "通信エラー: ${e.message}")
+                else -> fail(key, "予期しないエラー: ${e.javaClass.simpleName} ${e.message ?: ""}")
+            }
         }
     }
 
-    private fun fail(jobDir: File, message: String): Result {
-        jobDir.deleteRecursively()
+    private fun fail(key: String, message: String): Result {
+        JobQueue.remove(ctx, key)
         Prefs.setLastError(ctx, id.toString(), null)
         Notifier.result(ctx, progressId + 1, "保存できませんでした: $label", message, false)
         return Result.failure(workDataOf(OUT_ERROR to message))
@@ -118,7 +143,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 
         // ① ダウンロード
         if (!state.optBoolean("downloaded")) {
-            download(url, data, state)
+            download(url, data, state, ::saveState)
             state.put("downloaded", true)
             saveState()
         }
@@ -149,7 +174,15 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             report("ドライブを確認中", 0, 0, force = true)
             val existing = uploader.existingSize(fileName)
             if (existing == null || existing != data.length()) {
-                uploader.upload(data, fileName, mime) { done, total -> reportBlocking("ドライブへ保存中", done, total) }
+                uploader.upload(
+                    data, fileName, mime,
+                    savedSession = state.optString("uploadSession").ifBlank { null },
+                    onSession = { session ->
+                        if (session == null) state.remove("uploadSession") else state.put("uploadSession", session)
+                        saveState()
+                    },
+                    shouldStop = { isStopped },
+                ) { done, total -> reportBlocking("ドライブへ保存中", done, total) }
             }
             state.put("driveDone", true)
             saveState()
@@ -157,13 +190,18 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         return fileName + if (drive) "（Googleドライブ）" else "（Download/FANZA）"
     }
 
-    private suspend fun download(url: String, out: File, state: JSONObject) {
+    /** ダウンロード。途中まで落としたファイルがあれば、続きから（Rangeリクエスト）再開する */
+    private suspend fun download(url: String, out: File, state: JSONObject, saveState: () -> Unit) {
         Http.ensureAgeCheckCookie()
+        val have = if (out.exists()) out.length() else 0L
         val builder = Request.Builder().url(url)
             .header("User-Agent", inputData.getString(KEY_UA)?.takeIf { it.isNotBlank() } ?: Http.DESKTOP_UA)
         inputData.getString(KEY_REFERER)?.takeIf { it.startsWith("http") }?.let { builder.header("Referer", it) }
+        if (have > 0) builder.header("Range", "bytes=$have-")
 
         Http.client.newCall(builder.build()).execute().use { resp ->
+            // 416 = もう全部ダウンロード済み
+            if (resp.code == 416 && have > 0 && state.optLong("total", -1) == have) return
             if (!resp.isSuccessful) {
                 val msg = "ダウンロード失敗 HTTP ${resp.code}"
                 throw if (resp.code in 400..499 && resp.code != 408 && resp.code != 429) PermanentException(msg) else IOException(msg)
@@ -173,14 +211,21 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             if (mime == "text/html") {
                 throw PermanentException("ファイルではなくWebページが返されました。ログインが切れている可能性があります（アプリで再ログインしてください）")
             }
-            state.put("mime", mime)
-            state.put("finalUrl", resp.request.url.toString())
-            state.put("contentDisposition", resp.header("Content-Disposition").orEmpty())
+            // サーバーが続きからの送信に対応していれば追記、そうでなければ最初から
+            val resume = resp.code == 206 && have > 0
+            if (!resume || !state.has("mime")) {
+                state.put("mime", mime)
+                state.put("finalUrl", resp.request.url.toString())
+                state.put("contentDisposition", resp.header("Content-Disposition").orEmpty())
+            }
+            val length = body.contentLength()
+            val total = if (length < 0) -1 else if (resume) have + length else length
+            state.put("total", total)
+            saveState()
 
-            val total = body.contentLength()
-            var done = 0L
+            var done = if (resume) have else 0L
             body.byteStream().use { input ->
-                out.outputStream().use { output ->
+                java.io.FileOutputStream(out, resume).use { output ->
                     val buf = ByteArray(256 * 1024)
                     while (true) {
                         if (isStopped) throw IOException("中断されました")
@@ -192,7 +237,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                     }
                 }
             }
-            if (total > 0 && done != total) throw IOException("ダウンロードが途中で切れました")
+            if (total > 0 && done != total) throw IOException("ダウンロードが途中で切れました（続きから再開します）")
         }
     }
 
@@ -256,9 +301,22 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         const val KEY_TITLE_HINT = "title_hint"
         const val KEY_HISTORY = "history_key"
 
+        const val KEY_FORCE = "force"
+
         fun historyKey(url: String, cid: String?): String = cid?.takeIf { it.isNotBlank() } ?: url.substringBefore('?')
 
-        /** 保存処理を予約する。同じ作品が二重に予約されないようにする */
+        /** 作品を見分けるための名前。作品ID → 作品名 → URL の順に使う */
+        fun jobKey(url: String, cid: String?, title: String?): String =
+            cid?.takeIf { it.isNotBlank() } ?: title?.takeIf { it.isNotBlank() }?.let { "t:$it" } ?: url.substringBefore('?')
+
+        fun isSaved(c: Context, url: String, cid: String?, title: String?): Boolean =
+            Prefs.isDone(c, jobKey(url, cid, title)) || Prefs.isDone(c, historyKey(url, cid)) ||
+                (!title.isNullOrBlank() && Prefs.isDone(c, "t:$title"))
+
+        /**
+         * 保存処理を予約する。
+         * 同じ作品がすでに保存待ちなら追加しない（重複の自動除外）。
+         */
         fun enqueue(
             context: Context,
             url: String,
@@ -267,33 +325,102 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             contentDisposition: String?,
             cid: String?,
             titleHint: String?,
-        ) {
-            val key = historyKey(url, cid)
+            force: Boolean = false,
+        ): Queued {
+            val key = jobKey(url, cid, titleHint)
+            if (JobQueue.contains(context, key)) return Queued.DUPLICATE
+            val job = JSONObject()
+                .put(KEY_URL, url)
+                .put(KEY_UA, userAgent.orEmpty())
+                .put(KEY_REFERER, referer.orEmpty())
+                .put(KEY_CD, contentDisposition?.take(1000).orEmpty())
+                .put(KEY_CID, cid.orEmpty())
+                .put(KEY_TITLE_HINT, titleHint?.take(300).orEmpty())
+                .put(KEY_FORCE, force)
+            JobQueue.put(context, key, job)
+            if (Prefs.paused(context)) return Queued.PAUSED
+            schedule(context, key, job)
+            return Queued.QUEUED
+        }
+
+        private fun schedule(context: Context, key: String, job: JSONObject) {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(if (Prefs.wifiOnly(context)) NetworkType.UNMETERED else NetworkType.CONNECTED)
                 .build()
+            val title = job.optString(KEY_TITLE_HINT).ifBlank { null }
+            val cid = job.optString(KEY_CID).ifBlank { null }
+            val url = job.getString(KEY_URL)
             val request = OneTimeWorkRequestBuilder<DownloadWorker>()
                 .setConstraints(constraints)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .addTag(TAG)
-                .addTag(TITLE_TAG_PREFIX + (titleHint?.takeIf { it.isNotBlank() } ?: cid ?: url.substringBefore('?').takeLast(60)))
+                .addTag(TITLE_TAG_PREFIX + (title ?: cid ?: url.substringBefore('?').takeLast(60)))
+                .addTag(KEY_TAG_PREFIX + key)
                 .setInputData(
                     workDataOf(
                         KEY_URL to url,
-                        KEY_UA to userAgent,
-                        KEY_REFERER to referer,
-                        KEY_CD to contentDisposition?.take(1000),
+                        KEY_UA to job.optString(KEY_UA),
+                        KEY_REFERER to job.optString(KEY_REFERER),
+                        KEY_CD to job.optString(KEY_CD),
                         KEY_CID to cid,
-                        KEY_TITLE_HINT to titleHint?.take(300),
+                        KEY_TITLE_HINT to title,
                         KEY_HISTORY to key,
+                        KEY_FORCE to job.optBoolean(KEY_FORCE),
                     )
                 )
                 .build()
             WorkManager.getInstance(context).enqueueUniqueWork("dl:$key", ExistingWorkPolicy.KEEP, request)
         }
 
+        /** 台帳にある保存待ちをすべて予約し直す（アプリ起動時・アップデート後・再開時） */
+        fun restoreQueue(context: Context) {
+            if (Prefs.paused(context)) return
+            JobQueue.all(context).forEach { (key, job) -> schedule(context, key, job) }
+        }
+
+        /** 一時停止: 処理中・待機中をすべて止める（途中のファイルと台帳は残す） */
+        fun pauseAll(context: Context) {
+            Prefs.setPaused(context, true)
+            WorkManager.getInstance(context).cancelAllWorkByTag(TAG)
+        }
+
+        /** 再開: 台帳から予約し直す。ダウンロードは途中から続く */
+        fun resumeAll(context: Context) {
+            Prefs.setPaused(context, false)
+            restoreQueue(context)
+        }
+
+        /**
+         * 重複の整理（バックグラウンドスレッドで呼ぶこと）。
+         * 古いバージョンで二重に予約された作品や、すでに保存済みの作品の待機分を取り消す。
+         * @return 取り消した件数
+         */
+        fun removeDuplicates(context: Context): Int {
+            val wm = WorkManager.getInstance(context)
+            val infos = wm.getWorkInfosByTag(TAG).get().filter { !it.state.isFinished }
+            var removed = 0
+            infos.groupBy { info -> info.tags.firstOrNull { it.startsWith(TITLE_TAG_PREFIX) } ?: info.id.toString() }
+                .forEach { (tag, group) ->
+                    val title = tag.removePrefix(TITLE_TAG_PREFIX)
+                    val alreadySaved = Prefs.isDone(context, "t:$title") || Prefs.isDone(context, title)
+                    val keep = if (alreadySaved) null else group.firstOrNull { it.state == WorkInfo.State.RUNNING } ?: group.first()
+                    for (info in group) {
+                        if (info == keep || (alreadySaved && info.state == WorkInfo.State.RUNNING)) continue
+                        wm.cancelWorkById(info.id)
+                        info.tags.firstOrNull { it.startsWith(KEY_TAG_PREFIX) }?.let {
+                            val key = it.removePrefix(KEY_TAG_PREFIX)
+                            // 残す側と同じ作品の台帳は消さない
+                            if (keep == null || KEY_TAG_PREFIX + key !in keep.tags) JobQueue.remove(context, key)
+                        }
+                        removed++
+                    }
+                }
+            return removed
+        }
+
         const val TAG = "fanza_download"
         const val TITLE_TAG_PREFIX = "title:"
+        const val KEY_TAG_PREFIX = "key:"
         const val P_TEXT = "progress_text"
         const val P_PERCENT = "progress_percent"
         const val OUT_RESULT = "result"

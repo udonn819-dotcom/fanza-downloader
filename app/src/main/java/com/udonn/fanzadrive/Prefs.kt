@@ -76,6 +76,10 @@ object Prefs {
         if (message == null) errSp(c).edit().remove(workId).apply() else errSp(c).edit().putString(workId, message).apply()
     }
 
+    /** 一時停止中かどうか */
+    fun paused(c: Context): Boolean = sp(c).getBoolean("paused", false)
+    fun setPaused(c: Context, paused: Boolean) = sp(c).edit().putBoolean("paused", paused).commit()
+
     fun clearDone(c: Context) {
         sp(c).edit().remove(KEY_DONE).apply()
     }

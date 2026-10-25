@@ -26,6 +26,15 @@
             </intent-filter>
         </activity>
 
+        <!-- アップデート後に保存待ちの作品を自動で再開する -->
+        <receiver
+            android:name=".UpdateReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- WorkManager がバックグラウンド処理中に通知を出し続けるためのサービス -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

@@ -89,6 +89,10 @@ class MainActivity : AppCompatActivity() {
 
         if (savedInstanceState != null) webView.restoreState(savedInstanceState) else webView.loadUrl(LIBRARY_URL)
 
+        // 起動時に、重複した保存待ちを自動で取り消し、止まっていた保存待ちを再開する
+        updateStatusButton()
+        tidyUp(showResult = false)
+
         if (!Prefs.driveEnabled(this) && savedInstanceState == null) {
             Toast.makeText(this, "「設定」からGoogleドライブ連携を設定できます（未設定の場合は本体のDownload/FANZAに保存）", Toast.LENGTH_LONG).show()
         }
@@ -144,9 +148,26 @@ class MainActivity : AppCompatActivity() {
         val recent = System.currentTimeMillis() - lastClickAt < 60_000
         val cid = FileNames.findCid(url, contentDisposition) ?: lastClickCid.takeIf { recent }
         val hint = lastClickTitle.takeIf { recent && (lastClickCid == null || lastClickCid == cid) }
-        DownloadWorker.enqueue(this, url, userAgent ?: Http.DESKTOP_UA, referer, contentDisposition, cid, hint)
         val name = hint ?: cid ?: "作品"
-        Toast.makeText(this, "「$name」をバックグラウンドで保存します（進み具合は「保存状況」で確認できます）", Toast.LENGTH_LONG).show()
+        fun go(force: Boolean) {
+            val r = DownloadWorker.enqueue(this, url, userAgent ?: Http.DESKTOP_UA, referer, contentDisposition, cid, hint, force)
+            val msg = when (r) {
+                Queued.QUEUED -> "「$name」をバックグラウンドで保存します（進み具合は「保存状況」で確認できます）"
+                Queued.DUPLICATE -> "「$name」はすでに保存待ちです（重複のため追加しません）"
+                Queued.PAUSED -> "一時停止中です。「$name」は再開後に保存します"
+            }
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+        }
+        if (DownloadWorker.isSaved(this, url, cid, hint)) {
+            AlertDialog.Builder(this)
+                .setTitle("保存済みの作品です")
+                .setMessage("「$name」は保存済みです。もう一度保存しますか？")
+                .setPositiveButton("もう一度保存") { _, _ -> go(force = true) }
+                .setNegativeButton("やめる", null)
+                .show()
+        } else {
+            go(force = false)
+        }
     }
 
     /**
@@ -176,15 +197,17 @@ class MainActivity : AppCompatActivity() {
                 val o = items.getJSONObject(i)
                 val url = o.optString("url")
                 val cid = o.optString("cid").ifBlank { null } ?: FileNames.findCid(url)
-                if (Prefs.isDone(this, DownloadWorker.historyKey(url, cid))) {
+                val title = o.optString("title").ifBlank { null }
+                if (DownloadWorker.isSaved(this, url, cid, title) ||
+                    DownloadWorker.enqueue(this, url, Http.DESKTOP_UA, webView.url, null, cid, title) == Queued.DUPLICATE
+                ) {
                     skipped++
                     continue
                 }
-                DownloadWorker.enqueue(this, url, Http.DESKTOP_UA, webView.url, null, cid, o.optString("title").ifBlank { null })
                 queued++
             }
             when {
-                queued > 0 -> Toast.makeText(this, "${queued}件の保存を予約しました（保存済み${skipped}件はスキップ）", Toast.LENGTH_LONG).show()
+                queued > 0 -> Toast.makeText(this, "${queued}件の保存を予約しました（保存済み・保存待ちの${skipped}件はスキップ）", Toast.LENGTH_LONG).show()
                 !auto && items.length() == 0 -> AlertDialog.Builder(this)
                     .setTitle("ダウンロードリンクが見つかりません")
                     .setMessage("上の「購入済み」を押して購入済み作品の一覧を開いてから、もう一度お試しください。\n\nそれでも見つからない場合は、作品をタップして右側の「ダウンロード」ボタンを直接押してください（押した作品は自動で保存されます）。\n\n改善のため、「設定」→「ページ情報を保存」で作ったファイルを開発者に送っていただけると助かります。")
@@ -213,8 +236,9 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onBulkLink(url: String, title: String?) = runOnUiThread {
             val cid = FileNames.findCid(url)
-            if (Prefs.isDone(this@MainActivity, DownloadWorker.historyKey(url, cid))) return@runOnUiThread
-            DownloadWorker.enqueue(this@MainActivity, url, Http.DESKTOP_UA, webView.url, null, cid, title?.ifBlank { null })
+            val t = title?.ifBlank { null }
+            if (DownloadWorker.isSaved(this@MainActivity, url, cid, t)) return@runOnUiThread
+            DownloadWorker.enqueue(this@MainActivity, url, Http.DESKTOP_UA, webView.url, null, cid, t)
             bulkQueued++
         }
 
@@ -401,13 +425,46 @@ class MainActivity : AppCompatActivity() {
         val live = WorkManager.getInstance(this).getWorkInfosByTagLiveData(DownloadWorker.TAG)
         val observer = androidx.lifecycle.Observer<List<WorkInfo>> { infos -> text.text = statusText(infos) }
         live.observe(this, observer)
+        val paused = Prefs.paused(this)
         AlertDialog.Builder(this)
             .setTitle("保存状況")
             .setView(scroll)
             .setPositiveButton("閉じる", null)
-            .setNeutralButton("完了・失敗の表示を消す") { _, _ -> WorkManager.getInstance(this).pruneWork() }
+            .setNegativeButton(if (paused) "▶ 再開" else "⏸ 一時停止") { _, _ ->
+                if (paused) DownloadWorker.resumeAll(this) else DownloadWorker.pauseAll(this)
+                updateStatusButton()
+                Toast.makeText(
+                    this,
+                    if (paused) "再開しました（途中から続きます）" else "一時停止しました（途中までのデータは残ります）",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            .setNeutralButton("整理") { _, _ -> tidyUp(showResult = true) }
             .setOnDismissListener { live.removeObserver(observer) }
             .show()
+    }
+
+    /** 重複した保存待ちの取り消し・完了済み表示の削除・不要な一時ファイルの削除 */
+    private fun tidyUp(showResult: Boolean) {
+        val app = applicationContext
+        lifecycleScope.launch {
+            val removed = withContext(Dispatchers.IO) {
+                runCatching {
+                    val n = DownloadWorker.removeDuplicates(app)
+                    if (showResult) WorkManager.getInstance(app).pruneWork()
+                    JobQueue.cleanOrphans(app)
+                    DownloadWorker.restoreQueue(app)
+                    n
+                }.getOrDefault(0)
+            }
+            if (showResult || removed > 0) {
+                Toast.makeText(this@MainActivity, "重複していた保存待ち${removed}件を取り消しました", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun updateStatusButton() {
+        findViewById<Button>(R.id.btnStatus).text = if (Prefs.paused(this)) "⏸停止中" else "保存状況"
     }
 
     private fun statusText(infos: List<WorkInfo>): String {
@@ -424,12 +481,20 @@ class MainActivity : AppCompatActivity() {
                 else -> "Googleドライブ"
             }
         ).append("\n\n")
-        if (infos.isEmpty()) {
+        val paused = Prefs.paused(this)
+        if (paused) {
+            sb.append("⏸ 一時停止中です。下の「▶ 再開」で続きから再開します。\n\n")
+            JobQueue.all(this).values.forEach { job ->
+                sb.append("⏸ 停止中: ").append(job.optString(DownloadWorker.KEY_TITLE_HINT).ifBlank { job.optString(DownloadWorker.KEY_CID).ifBlank { "作品" } }).append("\n\n")
+            }
+        }
+        val shown = infos.filter { !(paused && it.state == WorkInfo.State.CANCELLED) }
+        if (shown.isEmpty() && (!paused || JobQueue.size(this) == 0)) {
             sb.append("まだ保存の予約はありません。\n作品をタップ→「ダウンロードする」を押すとここに表示されます。")
             return sb.toString()
         }
         val order = listOf(WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED, WorkInfo.State.FAILED, WorkInfo.State.SUCCEEDED, WorkInfo.State.CANCELLED)
-        for (info in infos.sortedBy { order.indexOf(it.state) }) {
+        for (info in shown.sortedBy { order.indexOf(it.state) }) {
             val title = info.tags.firstOrNull { it.startsWith(DownloadWorker.TITLE_TAG_PREFIX) }
                 ?.removePrefix(DownloadWorker.TITLE_TAG_PREFIX) ?: "作品"
             val lastError = Prefs.lastError(this, info.id.toString())
