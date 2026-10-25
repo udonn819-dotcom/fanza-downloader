@@ -1,0 +1,444 @@
+name: Build Fanza Downloader APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate Android Project & Source Code
+        run: |
+          mkdir -p app/src/main/java/com/example/fanzadrive
+          mkdir -p app/src/main/res/values
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FanzaDriveDownloader"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.0' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.20' apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.example.fanzadrive'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.example.fanzadrive"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.work:work-runtime-ktx:2.9.0'
+              implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="FANZA Drive保存"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name="androidx.work.impl.foreground.SystemForegroundService"
+                      android:foregroundServiceType="dataSync"
+                      tools:node="merge" />
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/fanzadrive/MainActivity.kt
+          package com.example.fanzadrive
+
+          import android.Manifest
+          import android.annotation.SuppressLint
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.webkit.*
+          import android.widget.*
+          import androidx.appcompat.app.AlertDialog
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+          import androidx.work.*
+
+          class MainActivity : AppCompatActivity() {
+              private lateinit var webView: WebView
+              private var lastClickedTitle: String? = null
+              private var lastContentId: String? = null
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+                      }
+                  }
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      layoutParams = LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.MATCH_PARENT
+                      )
+                  }
+
+                  val toolbar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setPadding(16, 16, 16, 16)
+                  }
+
+                  val btnLibrary = Button(this).apply {
+                      text = "購入済み一覧"
+                      setOnClickListener {
+                          webView.loadUrl("https://www.dmm.co.jp/dc/doujin/-/mylibrary/")
+                      }
+                  }
+
+                  val btnSetting = Button(this).apply {
+                      text = "保存先URL設定"
+                      setOnClickListener { showUrlSettingDialog() }
+                  }
+
+                  toolbar.addView(btnLibrary, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  toolbar.addView(btnSetting, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                  root.addView(toolbar)
+
+                  webView = WebView(this)
+                  root.addView(webView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+                  setContentView(root)
+
+                  val cookieManager = CookieManager.getInstance()
+                  cookieManager.setAcceptCookie(true)
+                  cookieManager.setAcceptThirdPartyCookies(webView, true)
+
+                  webView.settings.apply {
+                      javaScriptEnabled = true
+                      domStorageEnabled = true
+                      loadWithOverviewMode = true
+                      useWideViewPort = true
+                  }
+
+                  webView.addJavascriptInterface(object {
+                      @JavascriptInterface
+                      fun setWorkInfo(title: String?, cid: String?) {
+                          if (!title.isNullOrBlank()) lastClickedTitle = title.trim()
+                          if (!cid.isNullOrBlank()) lastContentId = cid.trim()
+                      }
+                  }, "AndroidBridge")
+
+                  webView.webViewClient = object : WebViewClient() {
+                      override fun onPageFinished(view: WebView?, url: String?) {
+                          super.onPageFinished(view, url)
+                          CookieManager.getInstance().flush()
+                          injectTitleExtractor()
+                      }
+                  }
+
+                  webView.setDownloadListener { url, userAgent, contentDisposition, _, _ ->
+                      val gasUrl = getSharedPreferences("fanza_prefs", Context.MODE_PRIVATE).getString("gas_url", "") ?: ""
+                      if (gasUrl.isBlank()) {
+                          Toast.makeText(this, "先に「保存先URL設定」からGASのURLを登録してください", Toast.LENGTH_LONG).show()
+                          showUrlSettingDialog()
+                          return@setDownloadListener
+                      }
+
+                      val cookies = cookieManager.getCookie(url) ?: cookieManager.getCookie("https://www.dmm.co.jp") ?: ""
+                      val cidMatch = Regex("(d_\\d+)").find(url) ?: Regex("(d_\\d+)").find(contentDisposition ?: "")
+                      val cid = cidMatch?.groupValues?.get(1) ?: lastContentId ?: ""
+                      val title = lastClickedTitle ?: ""
+
+                      val inputData = workDataOf(
+                          "DOWNLOAD_URL" to url,
+                          "COOKIES" to cookies,
+                          "USER_AGENT" to userAgent,
+                          "TITLE" to title,
+                          "CID" to cid,
+                          "GAS_URL" to gasUrl
+                      )
+
+                      val request = OneTimeWorkRequestBuilder<UploadWorker>()
+                          .setInputData(inputData)
+                          .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                          .build()
+
+                      WorkManager.getInstance(this).enqueue(request)
+                      val dispName = if (title.isNotBlank()) title else cid.ifBlank { "作品ファイル" }
+                      Toast.makeText(this, "「$dispName」をバックグラウンドでGoogleドライブへ保存開始しました", Toast.LENGTH_LONG).show()
+                  }
+
+                  webView.loadUrl("https://www.dmm.co.jp/dc/doujin/-/mylibrary/")
+              }
+
+              private fun injectTitleExtractor() {
+                  val js = """
+                      (function() {
+                          document.addEventListener('click', function(e) {
+                              var a = e.target.closest('a');
+                              if (!a) return;
+                              var cidMatch = a.href.match(/(d_\d+)/);
+                              var cid = cidMatch ? cidMatch[1] : '';
+                              var item = a.closest('li, tr, .d-item, .mylibraryList__item, div[class*="item"]');
+                              var title = '';
+                              if (item) {
+                                  var tEl = item.querySelector('.title, .d-itemTitle, h2, h3, [class*="title"], [class*="Title"]');
+                                  if (tEl) title = tEl.innerText;
+                              }
+                              if (!title && document.title) {
+                                  title = document.title.replace(/｜FANZA.*$/, '').replace(/- FANZA.*$/, '');
+                              }
+                              AndroidBridge.setWorkInfo(title, cid);
+                          }, true);
+                      })();
+                  """.trimIndent()
+                  webView.evaluateJavascript(js, null)
+              }
+
+              private fun showUrlSettingDialog() {
+                  val prefs = getSharedPreferences("fanza_prefs", Context.MODE_PRIVATE)
+                  val edit = EditText(this).apply {
+                      hint = "https://script.google.com/macros/s/.../exec"
+                      setText(prefs.getString("gas_url", ""))
+                  }
+                  AlertDialog.Builder(this)
+                      .setTitle("Googleドライブ連携URL (GAS) 設定")
+                      .setMessage("準備したGASのウェブアプリURLを貼り付けてください。ローカルのDownloadフォルダにも同時保存されます。")
+                      .setView(edit)
+                      .setPositiveButton("保存") { _, _ ->
+                          prefs.edit().putString("gas_url", edit.text.toString().trim()).apply()
+                          Toast.makeText(this, "設定を保存しました", Toast.LENGTH_SHORT).show()
+                      }
+                      .setNegativeButton("キャンセル", null)
+                      .show()
+              }
+
+              override fun onBackPressed() {
+                  if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/fanzadrive/UploadWorker.kt
+          package com.example.fanzadrive
+
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.util.Base64
+          import androidx.core.app.NotificationCompat
+          import androidx.work.CoroutineWorker
+          import androidx.work.ForegroundInfo
+          import androidx.work.WorkerParameters
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+          import org.json.JSONObject
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.util.concurrent.TimeUnit
+
+          class UploadWorker(private val ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+
+              private val client = OkHttpClient.Builder()
+                  .connectTimeout(120, TimeUnit.SECONDS)
+                  .readTimeout(300, TimeUnit.SECONDS)
+                  .writeTimeout(300, TimeUnit.SECONDS)
+                  .followRedirects(true)
+                  .followSslRedirects(true)
+                  .build()
+
+              override suspend fun getForegroundInfo(): ForegroundInfo {
+                  val channelId = "fanza_dl_channel"
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(channelId, "FANZA バックグラウンド保存", NotificationManager.IMPORTANCE_LOW)
+                      val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                      nm.createNotificationChannel(channel)
+                  }
+                  val notif = NotificationCompat.Builder(ctx, channelId)
+                      .setContentTitle("FANZA同人 自動保存中")
+                      .setContentText("バックグラウンドでダウンロード・Googleドライブ転送を実行しています...")
+                      .setSmallIcon(android.R.drawable.stat_sys_download)
+                      .setOngoing(true)
+                      .build()
+
+                  return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      ForegroundInfo(1001, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                  } else {
+                      ForegroundInfo(1001, notif)
+                  }
+              }
+
+              override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+                  try {
+                      setForeground(getForegroundInfo())
+                  } catch (_: Exception) {}
+
+                  val dlUrl = inputData.getString("DOWNLOAD_URL") ?: return@withContext Result.failure()
+                  val cookies = inputData.getString("COOKIES") ?: ""
+                  val ua = inputData.getString("USER_AGENT") ?: "Mozilla/5.0"
+                  var title = inputData.getString("TITLE") ?: ""
+                  var cid = inputData.getString("CID") ?: ""
+                  val gasUrl = inputData.getString("GAS_URL") ?: ""
+
+                  val tempFile = File(ctx.cacheDir, "temp_${System.currentTimeMillis()}.zip")
+                  try {
+                      val req = Request.Builder()
+                          .url(dlUrl)
+                          .header("Cookie", cookies)
+                          .header("User-Agent", ua)
+                          .build()
+
+                      client.newCall(req).execute().use { res ->
+                          if (!res.isSuccessful) return@withContext Result.failure()
+
+                          val finalUrl = res.request.url.toString()
+                          val disp = res.header("Content-Disposition") ?: ""
+                          if (cid.isBlank()) {
+                              val m = Regex("(d_\\d+)").find(finalUrl) ?: Regex("(d_\\d+)").find(disp)
+                              if (m != null) cid = m.groupValues[1]
+                          }
+
+                          val body = res.body ?: return@withContext Result.failure()
+                          FileOutputStream(tempFile).use { out ->
+                              body.byteStream().copyTo(out)
+                          }
+                      }
+
+                      if (title.isBlank() || title.contains("マイライブラリ") || title.contains("購入済み")) {
+                          if (cid.isNotBlank()) {
+                              title = fetchTitleFromDetail(cid) ?: cid
+                          }
+                      }
+
+                      val safeTitle = title.ifBlank { cid.ifBlank { "FANZA_${System.currentTimeMillis()}" } }
+                          .replace(Regex("[\\\\/:*?\"<>|]"), " ")
+                          .trim()
+                      val finalFileName = "$safeTitle.zip"
+
+                      // スマホ本体のDownloadフォルダにもリネーム済みで保存（大容量ファイルでも確実に残るようにする）
+                      saveToDownloads(tempFile, finalFileName)
+
+                      // GAS経由でGoogleドライブへ自動送信（約35MB以下の一般的な同人誌に対応）
+                      if (gasUrl.isNotBlank() && tempFile.length() < 36 * 1024 * 1024) {
+                          val bytes = tempFile.readBytes()
+                          val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                          val json = JSONObject().apply {
+                              put("fileName", finalFileName)
+                              put("contentId", cid)
+                              put("fileData", b64)
+                          }
+                          val postReq = Request.Builder()
+                              .url(gasUrl)
+                              .post(json.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                              .build()
+                          client.newCall(postReq).execute().close()
+                      }
+
+                      showCompleteNotification(finalFileName)
+                      Result.success()
+                  } catch (e: Exception) {
+                      e.printStackTrace()
+                      Result.failure()
+                  } finally {
+                      if (tempFile.exists()) tempFile.delete()
+                  }
+              }
+
+              private fun fetchTitleFromDetail(cid: String): String? {
+                  val url = "https://www.dmm.co.jp/dc/doujin/-/detail/=/cid=$cid/"
+                  return try {
+                      val req = Request.Builder()
+                          .url(url)
+                          .header("Cookie", "age_check_done=1")
+                          .build()
+                      client.newCall(req).execute().use { res ->
+                          val html = res.body?.string() ?: return null
+                          val m = Regex("<meta property=\"og:
