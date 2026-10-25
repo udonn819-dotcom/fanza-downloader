@@ -17,14 +17,19 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
+import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.android.gms.auth.api.identity.AuthorizationResult
+import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.material.materialswitch.MaterialSwitch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -249,8 +254,57 @@ class MainActivity : AppCompatActivity() {
 
     // ---------------------------------------------------------------- 設定
 
+    /** 「Googleでログイン」で開いたGoogleの許可画面から戻ってきたときの処理 */
+    private val googleLoginLauncher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { r ->
+        val result = runCatching {
+            Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(r.data)
+        }.getOrElse {
+            showLoginMessage("ログインがキャンセルされました")
+            return@registerForActivityResult
+        }
+        finishGoogleLogin(result)
+    }
+
+    private var settingsAccountView: TextView? = null
+
+    private fun startGoogleLogin() {
+        showLoginMessage("Googleに接続中…")
+        Identity.getAuthorizationClient(this).authorize(GoogleAuth.request(null))
+            .addOnSuccessListener { result ->
+                val pending = result.pendingIntent
+                if (result.hasResolution() && pending != null) {
+                    googleLoginLauncher.launch(IntentSenderRequest.Builder(pending.intentSender).build())
+                } else {
+                    finishGoogleLogin(result)
+                }
+            }
+            .addOnFailureListener { showLoginMessage("ログイン失敗: " + GoogleAuth.translate(it).message) }
+    }
+
+    private fun finishGoogleLogin(result: AuthorizationResult) {
+        lifecycleScope.launch {
+            val email = withContext(Dispatchers.IO) { runCatching { GoogleAuth.fetchEmail(result) } }
+            email.onSuccess {
+                Prefs.setGoogleAccount(this@MainActivity, it)
+                Prefs.setDriveMode(this@MainActivity, Prefs.MODE_API)
+                showLoginMessage("ログイン中: $it")
+                Toast.makeText(this@MainActivity, "Googleドライブ連携が完了しました", Toast.LENGTH_SHORT).show()
+            }.onFailure { showLoginMessage("ログイン失敗: ${it.message}") }
+        }
+    }
+
+    private fun showLoginMessage(msg: String) {
+        settingsAccountView?.text = msg
+        if (settingsAccountView == null) Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    }
+
     private fun showSettings() {
         val v = layoutInflater.inflate(R.layout.dialog_settings, null)
+        val radioApi = v.findViewById<RadioButton>(R.id.radioApi)
+        val radioGas = v.findViewById<RadioButton>(R.id.radioGas)
+        val groupApi = v.findViewById<View>(R.id.groupApi)
+        val groupGas = v.findViewById<View>(R.id.groupGas)
+        val textAccount = v.findViewById<TextView>(R.id.textAccount)
         val editUrl = v.findViewById<EditText>(R.id.editGasUrl).apply { setText(Prefs.gasUrl(this@MainActivity)) }
         val editKey = v.findViewById<EditText>(R.id.editGasKey).apply { setText(Prefs.gasKey(this@MainActivity)) }
         val swLocal = v.findViewById<MaterialSwitch>(R.id.switchLocal).apply { isChecked = Prefs.saveLocal(this@MainActivity) }
@@ -259,13 +313,27 @@ class MainActivity : AppCompatActivity() {
         val info = v.findViewById<TextView>(R.id.textInfo)
         info.text = "保存済み: ${Prefs.doneCount(this)}件\n※ドライブ連携が未設定のときは、本体の Download/FANZA フォルダに保存されます。"
 
+        val account = Prefs.googleAccount(this)
+        textAccount.text = if (account.isBlank()) "未ログイン" else "ログイン中: $account"
+        settingsAccountView = textAccount
+
+        fun updateGroups() {
+            groupApi.visibility = if (radioApi.isChecked) View.VISIBLE else View.GONE
+            groupGas.visibility = if (radioGas.isChecked) View.VISIBLE else View.GONE
+        }
+        (if (Prefs.driveMode(this) == Prefs.MODE_API) radioApi else radioGas).isChecked = true
+        updateGroups()
+        radioApi.setOnCheckedChangeListener { _, _ -> updateGroups() }
+        radioGas.setOnCheckedChangeListener { _, _ -> updateGroups() }
+
+        v.findViewById<Button>(R.id.btnGoogleLogin).setOnClickListener { startGoogleLogin() }
         v.findViewById<Button>(R.id.btnTestGas).setOnClickListener {
             val url = editUrl.text.toString().trim()
             val key = editKey.text.toString().trim()
             info.text = "テスト中…"
             lifecycleScope.launch {
                 val msg = withContext(Dispatchers.IO) {
-                    runCatching { "成功！ 保存先フォルダ: " + DriveUploader(url, key).ping() }
+                    runCatching { "成功！ 保存先フォルダ: " + GasBackend(url, key).ping() }
                         .getOrElse { "失敗: ${it.message}" }
                 }
                 info.text = msg
@@ -284,9 +352,11 @@ class MainActivity : AppCompatActivity() {
                     this, editUrl.text.toString(), editKey.text.toString(),
                     swLocal.isChecked, swWifi.isChecked, swAuto.isChecked,
                 )
+                Prefs.setDriveMode(this, if (radioApi.isChecked) Prefs.MODE_API else Prefs.MODE_GAS)
                 Toast.makeText(this, "設定を保存しました", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("キャンセル", null)
+            .setOnDismissListener { settingsAccountView = null }
             .show()
     }
 

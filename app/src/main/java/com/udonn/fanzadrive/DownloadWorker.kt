@@ -124,7 +124,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 
         // ④ Googleドライブに保存
         if (drive && !state.optBoolean("driveDone")) {
-            val uploader = DriveUploader(Prefs.gasUrl(ctx), Prefs.gasKey(ctx))
+            val uploader = DriveUploader.create(ctx)
             report("ドライブを確認中", 0, 0, force = true)
             val existing = uploader.existingSize(fileName)
             if (existing == null || existing != data.length()) {

@@ -12,7 +12,56 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Googleドライブ連携（GASのウェブアプリURL）" />
+            android:text="Googleドライブへの保存方式"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/radioMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <RadioButton
+                android:id="@+id/radioApi"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="API方式（Googleでログイン）" />
+
+            <RadioButton
+                android:id="@+id/radioGas"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="GAS方式（中継スクリプト）" />
+        </RadioGroup>
+
+        <LinearLayout
+            android:id="@+id/groupApi"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/textAccount"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp" />
+
+            <Button
+                android:id="@+id/btnGoogleLogin"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Googleでログイン" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/groupGas"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="GASのウェブアプリURL" />
 
         <EditText
             android:id="@+id/editGasUrl"
@@ -33,6 +82,14 @@
             android:layout_height="wrap_content"
             android:inputType="textVisiblePassword" />
 
+        <Button
+            android:id="@+id/btnTestGas"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="GAS連携をテスト" />
+        </LinearLayout>
+
         <com.google.android.material.materialswitch.MaterialSwitch
             android:id="@+id/switchLocal"
             android:layout_width="match_parent"
@@ -51,14 +108,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="購入済みページを開いたら未保存作品を自動で保存" />
-
-        <Button
-            android:id="@+id/btnTestGas"
-            style="@style/Widget.Material3.Button.OutlinedButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Googleドライブ連携をテスト" />
 
         <Button
             android:id="@+id/btnClearHistory"
