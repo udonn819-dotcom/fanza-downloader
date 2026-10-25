@@ -591,11 +591,15 @@ class MainActivity : AppCompatActivity() {
               }
               // 画面左側の作品一覧にある分類ラベル
               function leftLabels(){
-                return [].filter.call(document.querySelectorAll('body *'), function(e){
+                var all=[].filter.call(document.querySelectorAll('body *'), function(e){
                   if(e.children.length!=0 || !CAT.test(txt(e))) return false;
                   var r=e.getBoundingClientRect();
                   return r.width>0 && r.left<LEFT;
                 });
+                // 一覧のラベルは縦一列に並ぶので、一番多い横位置のものだけを残す（右側のおすすめ等を除外）
+                var count={}, best=null;
+                all.forEach(function(e){ var x=Math.round(e.getBoundingClientRect().left/8); count[x]=(count[x]||0)+1; if(best===null||count[x]>count[best]) best=x; });
+                return all.filter(function(e){ return Math.abs(Math.round(e.getBoundingClientRect().left/8)-best)<=1; });
               }
               // ラベルから親をたどり、ラベルを1つだけ含む一番大きな枠＝1作品
               function findItems(){
