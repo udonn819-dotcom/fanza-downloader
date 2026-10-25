@@ -580,40 +580,41 @@ class MainActivity : AppCompatActivity() {
               function txt(el){ return ((el && (el.innerText||el.textContent))||'').trim(); }
               function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
 
-              // 「購入済み作品」という見出しを含む列（作品一覧）を探す
-              function findColumn(){
-                var heads=[].filter.call(document.querySelectorAll('body *'), function(e){
+              // 作品には必ず「コミック」「CG」「ボイス」などの分類ラベルが付いているので、それを目印にする
+              var CAT=/^(コミック|CG|ボイス|ゲーム|動画|音声|ASMR|写真集?|小説|ノベル|その他|ツール|イラスト|マンガ|アニメ|単話)(・AI)?$/;
+              var LEFT=window.innerWidth*0.4;
+              function isLibrary(){
+                if(location.href.indexOf('mylibrary')>=0) return true;
+                return [].some.call(document.querySelectorAll('body *'), function(e){
                   return e.children.length==0 && /^購入済み(作品|商品)/.test(txt(e));
                 });
-                for(var i=0;i<heads.length;i++){
-                  var el=heads[i];
-                  while(el && el!==document.body){
-                    if(el.getBoundingClientRect().width > window.innerWidth*0.6) break;
-                    if(el.querySelectorAll('img').length>=2) return el;
-                    el=el.parentElement;
-                  }
-                }
-                return null;
               }
-              // 列の中で「サムネイル画像＋文字」が同じ形で並んでいる要素＝作品
-              function findItems(col){
-                var out=[];
-                col.querySelectorAll('img').forEach(function(img){
-                  var el=img;
-                  while(el.parentElement && el!==col){
-                    var p=el.parentElement, same=0;
-                    for(var k=0;k<p.children.length;k++) if(p.children[k].tagName==el.tagName) same++;
-                    if(same>=3 && txt(el).length>3) break;
+              // 画面左側の作品一覧にある分類ラベル
+              function leftLabels(){
+                return [].filter.call(document.querySelectorAll('body *'), function(e){
+                  if(e.children.length!=0 || !CAT.test(txt(e))) return false;
+                  var r=e.getBoundingClientRect();
+                  return r.width>0 && r.left<LEFT;
+                });
+              }
+              // ラベルから親をたどり、ラベルを1つだけ含む一番大きな枠＝1作品
+              function findItems(){
+                var labels=leftLabels(), out=[];
+                labels.forEach(function(l){
+                  var el=l;
+                  while(el.parentElement && el.parentElement!==document.body){
+                    var p=el.parentElement, n=0;
+                    for(var k=0;k<labels.length && n<2;k++) if(p.contains(labels[k])) n++;
+                    if(n>=2 || p.getBoundingClientRect().width>window.innerWidth*0.5) break;
                     el=p;
                   }
-                  if(el!==col && out.indexOf(el)<0 && txt(el).length>3) out.push(el);
+                  if(out.indexOf(el)<0) out.push(el);
                 });
                 return out;
               }
-              var LABELS=/^(コミック|CG|ボイス|ゲーム|動画|音声|ASMR|写真|小説|その他|NEW|新着|予約)$/;
               function itemTitle(item){
                 var lines=txt(item).split('\n').map(function(s){return s.trim();}).filter(function(s){
-                  return s && !LABELS.test(s) && !/^\d{4}年/.test(s);
+                  return s && !CAT.test(s) && !/^\d{4}年/.test(s);
                 });
                 var best=''; lines.forEach(function(s){ if(s.length>best.length) best=s; });
                 return best;
@@ -622,42 +623,47 @@ class MainActivity : AppCompatActivity() {
                 var m=(el.outerHTML||'').match(/(?:^|[^A-Za-z0-9_])(d_[a-z0-9]*\d[a-z0-9]*)/);
                 return m?m[1]:'';
               }
-              // 一覧以外の場所にある「ダウンロード」ボタン・リンク
-              function findDownloads(col){
-                return [].filter.call(document.querySelectorAll('a, button, [role="button"], input[type="button"], input[type="submit"]'), function(e){
-                  if(col.contains(e) || !vis(e)) return false;
-                  var t=txt(e)||e.value||e.title||e.getAttribute('aria-label')||'';
+              // 一覧より右側にある「ダウンロード」ボタン・リンク
+              function findDownloads(listRight){
+                var res=[];
+                document.querySelectorAll('a, button, [role="button"], input[type="button"], input[type="submit"], div, span, p').forEach(function(e){
+                  var r=e.getBoundingClientRect();
+                  if(r.width==0 || r.height==0 || r.left<listRight) return;
+                  var t=(txt(e)||e.value||e.title||'').replace(/\s+/g,'');
                   var h=e.getAttribute('href')||'';
-                  return /ダウンロード|download/i.test(t) || (/download/i.test(h) && !/dlsoft|dl_soft|app/i.test(h));
-                }).filter(function(e){
-                  var t=txt(e)||e.value||'';
-                  return !/(アプリ|ビューア|ビューワ|DMMブックス|ソフト|方法|ヘルプ|について)/.test(t);
+                  if(!(/^ダウンロード/.test(t) || (e.tagName=='A' && /download/i.test(h)))) return;
+                  if(t.length>40 || /(アプリ|ビューア|ビューワ|ソフト|方法|ヘルプ|について)/.test(t)) return;
+                  var c=e.closest('a, button, [role="button"]')||e;
+                  if(res.indexOf(c)<0) res.push(c);
                 });
+                // 外側の枠と内側のボタンが両方入っていたら内側だけ残す
+                return res.filter(function(e){ return !res.some(function(o){ return o!==e && e.contains(o); }); });
               }
               function key(list){ return list.map(function(e){ return e.outerHTML; }).join('|'); }
 
-              var col=findColumn();
-              if(!col) return 'nolist';
+              if(!isLibrary() || findItems().length==0) return 'nolist';
               window.__fdBulkRunning=true; window.__fdStop=false;
 
               (async function(){
                 var checked=0, skipped=0, found=0;
                 try{
                   // 下までスクロールして全作品を読み込ませる
-                  var items=findItems(col), prev=-1, tries=0;
+                  var items=findItems(), prev=-1, tries=0;
                   while(items.length!==prev && tries<30 && !window.__fdStop){
                     prev=items.length; tries++;
                     if(items.length) items[items.length-1].scrollIntoView();
                     window.scrollTo(0, document.body.scrollHeight);
                     await sleep(1500);
-                    items=findItems(col);
+                    items=findItems();
                   }
+                  var listRight=0;
+                  items.forEach(function(it){ listRight=Math.max(listRight, it.getBoundingClientRect().right); });
                   for(var i=0;i<items.length && !window.__fdStop;i++){
                     var item=items[i], title=itemTitle(item), cid=cidOf(item);
                     FanzaDrive.onBulkProgress(i+1, items.length);
                     checked++;
                     if(title && DONE.indexOf(title)>=0){ skipped++; continue; }
-                    var before=key(findDownloads(col));
+                    var before=key(findDownloads(listRight));
                     item.scrollIntoView({block:'center'});
                     var target=item.querySelector('a[href]:not([href^="javascript"])')||item.querySelector('a,[role="button"]')||item;
                     target.click();
@@ -665,7 +671,7 @@ class MainActivity : AppCompatActivity() {
                     var dls=[];
                     for(var w=0; w<16; w++){
                       await sleep(500);
-                      dls=findDownloads(col);
+                      dls=findDownloads(listRight);
                       if(dls.length && key(dls)!==before) break;
                     }
                     for(var d=0; d<dls.length; d++){

@@ -16,6 +16,8 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
@@ -68,8 +70,14 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         label = inputData.getString(KEY_TITLE_HINT)?.takeIf { it.isNotBlank() } ?: "FANZA作品"
         runCatching { setForeground(foregroundInfo("準備中…", null)) }
 
+        // 大きな作品が一度に何件も重なると空き容量が足りなくなるので、同時に処理するのは2件まで
+        runCatching { setProgress(workDataOf(P_TEXT to "順番待ち（同時に2件まで処理します）", P_PERCENT to -1)) }
+        slots.withPermit { work(url, historyKey) }
+    }
+
+    private suspend fun work(url: String, historyKey: String): Result {
         val jobDir = File(ctx.noBackupFilesDir, "jobs/$id").apply { mkdirs() }
-        try {
+        return try {
             val name = process(url, jobDir)
             Prefs.markDone(ctx, historyKey)
             inputData.getString(KEY_TITLE_HINT)?.takeIf { it.isNotBlank() }?.let { Prefs.markDone(ctx, "t:$it") }
@@ -87,6 +95,8 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             } else {
                 fail(jobDir, "通信エラー: ${e.message}")
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             fail(jobDir, "予期しないエラー: ${e.javaClass.simpleName} ${e.message ?: ""}")
         }
@@ -237,6 +247,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 
     companion object {
         private const val MAX_ATTEMPTS = 5
+        private val slots = Semaphore(2)
         const val KEY_URL = "url"
         const val KEY_UA = "ua"
         const val KEY_REFERER = "referer"
