@@ -117,6 +117,13 @@
             android:text="保存済み履歴をリセット" />
 
         <Button
+            android:id="@+id/btnClearKept"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="失敗した作品の途中データを削除" />
+
+        <Button
             android:id="@+id/btnDumpPage"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"

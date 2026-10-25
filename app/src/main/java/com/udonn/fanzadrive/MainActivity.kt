@@ -481,6 +481,10 @@ class MainActivity : AppCompatActivity() {
                 else -> "Googleドライブ"
             }
         ).append("\n\n")
+        val keptCount = JobQueue.keptCount(this)
+        if (keptCount > 0) {
+            sb.append("📦 途中までのデータを残してある作品: ${keptCount}件（ダウンロードを押し直すと続きから再開）\n\n")
+        }
         val paused = Prefs.paused(this)
         if (paused) {
             sb.append("⏸ 一時停止中です。下の「▶ 再開」で続きから再開します。\n\n")
@@ -570,6 +574,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
         v.findViewById<Button>(R.id.btnDumpPage).setOnClickListener { dumpPage(info) }
+        val btnKept = v.findViewById<Button>(R.id.btnClearKept)
+        btnKept.text = "失敗した作品の途中データを削除（${JobQueue.keptCount(this)}件・" +
+            String.format("%.0fMB", JobQueue.keptBytes(this) / 1024.0 / 1024.0) + "）"
+        btnKept.setOnClickListener {
+            JobQueue.clearKept(this)
+            btnKept.text = "失敗した作品の途中データを削除（0件）"
+            info.text = "途中データを削除しました"
+        }
         v.findViewById<Button>(R.id.btnClearHistory).setOnClickListener {
             Prefs.clearDone(this)
             info.text = "履歴をリセットしました"
@@ -745,9 +757,11 @@ class MainActivity : AppCompatActivity() {
                     }
                     for(var d=0; d<dls.length; d++){
                       var el=dls[d], href=el.href||'';
-                      FanzaDrive.onItemClick(title, cid);
+                      // 1作品に複数のダウンロードがある場合は (1)(2)… を付けて別々に保存
+                      var t=dls.length>1 ? title+' ('+(d+1)+')' : title;
+                      FanzaDrive.onItemClick(t, cid);
                       if(/^https?:/.test(href) && !/#$/.test(href)){
-                        FanzaDrive.onBulkLink(href, title);
+                        FanzaDrive.onBulkLink(href, t);
                       }else{
                         el.click();
                         await sleep(3000);

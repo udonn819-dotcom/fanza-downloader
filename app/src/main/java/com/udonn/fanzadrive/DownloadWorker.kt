@@ -36,15 +36,15 @@ enum class Queued { QUEUED, DUPLICATE, PAUSED }
 class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
     private val ctx get() = applicationContext
-    private val progressId = id.hashCode()
     private var lastNotify = 0L
     private var label = "FANZA作品"
 
-    override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo("準備中…", null)
+    override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo()
 
-    private fun foregroundInfo(text: String, percent: Int?) = ForegroundInfo(
-        progressId,
-        Notifier.progress(ctx, label, text, percent),
+    /** 通知は全作品で共通の1つ（全体の件数・完了・失敗・残りだけを表示） */
+    private fun foregroundInfo() = ForegroundInfo(
+        Notifier.SUMMARY_ID,
+        Notifier.summary(ctx),
         ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
     )
 
@@ -54,7 +54,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         lastNotify = now
         val percent = if (total > 0) ((done * 100) / total).toInt() else null
         val sizeText = if (total > 0) "${mb(done)} / ${mb(total)}" else mb(done)
-        runCatching { setForeground(foregroundInfo("$text  $sizeText", percent)) }
+        runCatching { setForeground(foregroundInfo()) }
         runCatching { setProgress(workDataOf(P_TEXT to "$text  $sizeText", P_PERCENT to (percent ?: -1))) }
     }
 
@@ -64,7 +64,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         if (now - lastNotify < 1000) return
         lastNotify = now
         val percent = if (total > 0) ((done * 100) / total).toInt() else null
-        runCatching { setForegroundAsync(foregroundInfo("$text  ${mb(done)} / ${mb(total)}", percent)) }
+        runCatching { setForegroundAsync(foregroundInfo()) }
         runCatching { setProgressAsync(workDataOf(P_TEXT to "$text  ${mb(done)} / ${mb(total)}", P_PERCENT to (percent ?: -1))) }
     }
 
@@ -79,6 +79,8 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             (Prefs.isDone(ctx, key) || (titleHint != null && Prefs.isDone(ctx, "t:$titleHint")))
         ) {
             JobQueue.remove(ctx, key)
+            Prefs.addStat(ctx, Prefs.ST_TOTAL, -1)
+            notifyIfAllFinished()
             return@withContext Result.success(workDataOf(OUT_RESULT to "$label（保存済みのため重複をスキップ）"))
         }
         // 古いバージョンで予約された分も台帳に載せ、一時停止・アップデート後に再開できるようにする
@@ -90,8 +92,9 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                     .put(KEY_CID, inputData.getString(KEY_CID).orEmpty()).put(KEY_TITLE_HINT, titleHint.orEmpty())
                     .put(KEY_FORCE, inputData.getBoolean(KEY_FORCE, false)),
             )
+            Prefs.addStat(ctx, Prefs.ST_TOTAL, 1)
         }
-        runCatching { setForeground(foregroundInfo("順番待ち…", null)) }
+        runCatching { setForeground(foregroundInfo()) }
 
         // 大きな作品が一度に何件も重なると空き容量が足りなくなるので、同時に処理するのは2件まで
         runCatching { setProgress(workDataOf(P_TEXT to "順番待ち（同時に2件まで処理します）", P_PERCENT to -1)) }
@@ -107,7 +110,8 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             Prefs.markDone(ctx, historyKey(url, inputData.getString(KEY_CID)))
             JobQueue.remove(ctx, key)
             Prefs.setLastError(ctx, id.toString(), null)
-            Notifier.result(ctx, progressId + 1, "保存しました", name, true)
+            Prefs.addStat(ctx, Prefs.ST_DONE, 1)
+            notifyIfAllFinished()
             Result.success(workDataOf(OUT_RESULT to name))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // 一時停止・中止。途中のファイルは残して続きから再開できるようにする
@@ -128,10 +132,24 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
     }
 
     private fun fail(key: String, message: String): Result {
-        JobQueue.remove(ctx, key)
+        val data = File(JobQueue.jobDir(ctx, key), "data.bin")
+        val msg = if (data.exists() && data.length() > 0) {
+            // URLの期限切れなどで失敗しても、途中までのデータは残す。押し直すと続きから再開できる
+            JobQueue.keep(ctx, key, inputData.getString(KEY_TITLE_HINT), inputData.getString(KEY_CID))
+            "$message\n→ 途中まで（${mb(data.length())}）のデータは残してあります。作品の「ダウンロードする」を押し直すか「一括保存」で続きから再開します"
+        } else {
+            JobQueue.remove(ctx, key)
+            message
+        }
         Prefs.setLastError(ctx, id.toString(), null)
-        Notifier.result(ctx, progressId + 1, "保存できませんでした: $label", message, false)
-        return Result.failure(workDataOf(OUT_ERROR to message))
+        Prefs.addStat(ctx, Prefs.ST_FAILED, 1)
+        notifyIfAllFinished()
+        return Result.failure(workDataOf(OUT_ERROR to msg))
+    }
+
+    /** 保存待ちが全部なくなったら、まとめの通知を出す */
+    private fun notifyIfAllFinished() {
+        if (JobQueue.size(ctx) == 0) Notifier.finished(ctx)
     }
 
     /** 途中で失敗して再試行になっても、済んだ工程はやり直さないよう状態をファイルに残す */
@@ -327,8 +345,20 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             titleHint: String?,
             force: Boolean = false,
         ): Queued {
-            val key = jobKey(url, cid, titleHint)
+            var key = jobKey(url, cid, titleHint)
             if (JobQueue.contains(context, key)) return Queued.DUPLICATE
+            // 前に失敗して途中までのデータを残してある作品なら、そのデータを引き継いで続きから
+            if (!JobQueue.jobDir(context, key).exists()) {
+                JobQueue.findKept(context, cid, titleHint)?.let { key = it }
+                if (JobQueue.contains(context, key)) return Queued.DUPLICATE
+            }
+            JobQueue.dropKept(context, key)
+            // 前回分が全部終わっていたら、通知の件数を数え直す
+            if (JobQueue.size(context) == 0) {
+                Prefs.resetStats(context)
+                Notifier.clearFinished(context)
+            }
+            Prefs.addStat(context, Prefs.ST_TOTAL, 1)
             val job = JSONObject()
                 .put(KEY_URL, url)
                 .put(KEY_UA, userAgent.orEmpty())
@@ -382,11 +412,13 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         fun pauseAll(context: Context) {
             Prefs.setPaused(context, true)
             WorkManager.getInstance(context).cancelAllWorkByTag(TAG)
+            if (JobQueue.size(context) > 0) Notifier.paused(context)
         }
 
         /** 再開: 台帳から予約し直す。ダウンロードは途中から続く */
         fun resumeAll(context: Context) {
             Prefs.setPaused(context, false)
+            Notifier.clearFinished(context)
             restoreQueue(context)
         }
 
@@ -410,7 +442,10 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                         info.tags.firstOrNull { it.startsWith(KEY_TAG_PREFIX) }?.let {
                             val key = it.removePrefix(KEY_TAG_PREFIX)
                             // 残す側と同じ作品の台帳は消さない
-                            if (keep == null || KEY_TAG_PREFIX + key !in keep.tags) JobQueue.remove(context, key)
+                            if ((keep == null || KEY_TAG_PREFIX + key !in keep.tags) && JobQueue.contains(context, key)) {
+                                JobQueue.remove(context, key)
+                                Prefs.addStat(context, Prefs.ST_TOTAL, -1)
+                            }
                         }
                         removed++
                     }
