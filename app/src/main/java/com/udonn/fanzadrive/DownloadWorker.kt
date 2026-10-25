@@ -70,6 +70,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         try {
             val name = process(url, jobDir)
             Prefs.markDone(ctx, historyKey)
+            inputData.getString(KEY_TITLE_HINT)?.takeIf { it.isNotBlank() }?.let { Prefs.markDone(ctx, "t:$it") }
             jobDir.deleteRecursively()
             Notifier.result(ctx, progressId + 1, "保存しました", name, true)
             Result.success()

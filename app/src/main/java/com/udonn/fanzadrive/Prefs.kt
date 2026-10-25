@@ -63,7 +63,11 @@ object Prefs {
         sp(c).edit().putStringSet(KEY_DONE, set).apply()
     }
 
-    fun doneCount(c: Context): Int = sp(c).getStringSet(KEY_DONE, emptySet())!!.size
+    /** 一覧に表示されている作品名で保存済みかを判定するための記録（"t:作品名"） */
+    fun doneTitles(c: Context): List<String> =
+        sp(c).getStringSet(KEY_DONE, emptySet())!!.filter { it.startsWith("t:") }.map { it.removePrefix("t:") }
+
+    fun doneCount(c: Context): Int = sp(c).getStringSet(KEY_DONE, emptySet())!!.count { !it.startsWith("t:") }
 
     fun clearDone(c: Context) {
         sp(c).edit().remove(KEY_DONE).apply()

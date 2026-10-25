@@ -116,6 +116,13 @@
             android:layout_height="wrap_content"
             android:text="保存済み履歴をリセット" />
 
+        <Button
+            android:id="@+id/btnDumpPage"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="ページ情報を保存（不具合報告用）" />
+
         <TextView
             android:id="@+id/textInfo"
             android:layout_width="match_parent"
