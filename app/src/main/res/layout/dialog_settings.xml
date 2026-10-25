@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Googleドライブ連携（GASのウェブアプリURL）" />
+
+        <EditText
+            android:id="@+id/editGasUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="https://script.google.com/macros/s/.../exec"
+            android:inputType="textUri" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="合言葉（GASの SECRET と同じ文字列）" />
+
+        <EditText
+            android:id="@+id/editGasKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="textVisiblePassword" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchLocal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="スマホ本体（Download/FANZA）にも保存する" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchWifi"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Wi-Fi接続中のみ処理する" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchAuto"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="購入済みページを開いたら未保存作品を自動で保存" />
+
+        <Button
+            android:id="@+id/btnTestGas"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Googleドライブ連携をテスト" />
+
+        <Button
+            android:id="@+id/btnClearHistory"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="保存済み履歴をリセット" />
+
+        <TextView
+            android:id="@+id/textInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textSize="12sp" />
+    </LinearLayout>
+</ScrollView>
