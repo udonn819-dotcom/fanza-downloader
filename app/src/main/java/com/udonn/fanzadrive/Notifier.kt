@@ -28,19 +28,20 @@ object Notifier {
     /** 全部終わったとき・一時停止したときの通知 */
     private const val FINISHED_ID = 1001
 
-    private data class Counts(val total: Int, val done: Int, val failed: Int) {
-        val remaining get() = maxOf(0, total - done - failed)
+    /** 件数は「完了・失敗の数」と「今台帳に残っている数」から毎回計算するので、ずれない */
+    private data class Counts(val done: Int, val failed: Int, val remaining: Int) {
+        val total get() = done + failed + remaining
         val text get() = "完了 ${done}件 ・ 失敗 ${failed}件 ・ 残り ${remaining}件"
     }
 
     private fun counts(c: Context) =
-        Counts(Prefs.stat(c, Prefs.ST_TOTAL), Prefs.stat(c, Prefs.ST_DONE), Prefs.stat(c, Prefs.ST_FAILED))
+        Counts(Prefs.stat(c, Prefs.ST_DONE), Prefs.stat(c, Prefs.ST_FAILED), JobQueue.size(c))
 
     /** 「全体で何件・完了・失敗・残り」だけを表示する処理中の通知 */
     fun summary(c: Context): Notification {
         createChannels(c)
         val n = counts(c)
-        val total = maxOf(n.total, n.done + n.failed)
+        val total = n.total
         return NotificationCompat.Builder(c, CH_PROGRESS)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("FANZA保存中  ${n.done + n.failed} / ${total}件")
@@ -55,9 +56,9 @@ object Notifier {
     /** 全部終わったときのまとめ通知 */
     fun finished(c: Context) {
         val n = counts(c)
-        if (n.total == 0 && n.done == 0 && n.failed == 0) return
+        if (n.total == 0) return
         val extra = if (n.failed > 0) "\n失敗した作品は「保存状況」で理由を確認できます" else ""
-        post(c, "保存が終わりました（全${maxOf(n.total, n.done + n.failed)}件）", "完了 ${n.done}件 ・ 失敗 ${n.failed}件$extra", n.failed == 0)
+        post(c, "保存が終わりました（全${n.total}件）", "完了 ${n.done}件 ・ 失敗 ${n.failed}件$extra", n.failed == 0)
     }
 
     fun paused(c: Context) {

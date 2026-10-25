@@ -28,7 +28,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
@@ -415,7 +414,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 「保存状況」: 予約した作品が今どうなっているか（進み具合・エラー理由）を一覧表示する */
+    /** 「保存状況」: 処理中・順番待ち・完了・失敗を一覧表示する（1秒ごとに更新） */
     private fun showStatus() {
         val text = TextView(this).apply {
             setPadding(48, 24, 48, 24)
@@ -423,9 +422,16 @@ class MainActivity : AppCompatActivity() {
             setTextIsSelectable(true)
         }
         val scroll = android.widget.ScrollView(this).apply { addView(text) }
-        val live = WorkManager.getInstance(this).getWorkInfosByTagLiveData(DownloadWorker.TAG)
-        val observer = androidx.lifecycle.Observer<List<WorkInfo>> { infos -> text.text = statusText(infos) }
-        live.observe(this, observer)
+        val handler = android.os.Handler(mainLooper)
+        val refresh = object : Runnable {
+            override fun run() {
+                lifecycleScope.launch {
+                    text.text = withContext(Dispatchers.IO) { statusText() }
+                }
+                handler.postDelayed(this, 1000)
+            }
+        }
+        refresh.run()
         val paused = Prefs.paused(this)
         AlertDialog.Builder(this)
             .setTitle("保存状況")
@@ -441,26 +447,26 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
             .setNeutralButton("整理") { _, _ -> tidyUp(showResult = true) }
-            .setOnDismissListener { live.removeObserver(observer) }
+            .setOnDismissListener { handler.removeCallbacks(refresh) }
             .show()
     }
 
-    /** 重複した保存待ちの取り消し・完了済み表示の削除・不要な一時ファイルの削除 */
+    /** 完了・失敗の表示を消し、不要な一時ファイルを削除し、待機中の作品をすぐ再試行する */
     private fun tidyUp(showResult: Boolean) {
         val app = applicationContext
         lifecycleScope.launch {
-            val removed = withContext(Dispatchers.IO) {
+            withContext(Dispatchers.IO) {
                 runCatching {
-                    val n = DownloadWorker.removeDuplicates(app)
-                    if (showResult) WorkManager.getInstance(app).pruneWork()
+                    if (showResult) {
+                        JobLog.clear(app)
+                        WorkManager.getInstance(app).pruneWork()
+                        DownloadWorker.retryNow(app)
+                    }
                     JobQueue.cleanOrphans(app)
                     DownloadWorker.restoreQueue(app)
-                    n
-                }.getOrDefault(0)
+                }
             }
-            if (showResult || removed > 0) {
-                Toast.makeText(this@MainActivity, "重複していた保存待ち${removed}件を取り消しました", Toast.LENGTH_LONG).show()
-            }
+            if (showResult) Toast.makeText(this@MainActivity, "完了・失敗の表示を消し、待機中の作品をすぐ再試行します", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -501,7 +507,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnStatus).text = if (Prefs.paused(this)) "⏸停止中" else "保存状況"
     }
 
-    private fun statusText(infos: List<WorkInfo>): String {
+    private fun statusText(): String {
         val sb = StringBuilder()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -517,54 +523,59 @@ class MainActivity : AppCompatActivity() {
                 Prefs.saveLocal(this) -> "Googleドライブ ＋ 本体の Download/FANZA"
                 else -> "Googleドライブ"
             }
-        ).append("\n\n")
+        ).append("\n")
+
+        val queue = JobQueue.all(this)
+        val log = JobLog.all(this)
+        val done = log.count { it.ok }
+        val failed = log.filter { !it.ok }
+        sb.append("残り ${queue.size}件 ・ 完了 ${done}件 ・ 失敗 ${failed.size}件\n\n")
+
+        if (Prefs.paused(this)) sb.append("⏸ 一時停止中です。下の「▶ 再開」で続きから再開します。\n\n")
+
+        // 処理中（同時に2件まで）
+        val active = DownloadWorker.active
+        if (active.isNotEmpty()) {
+            sb.append("【処理中】\n")
+            active.values.forEach { a ->
+                sb.append("⏬ ").append(a.label).append("\n　").append(a.text)
+                if (a.percent >= 0) sb.append("（").append(a.percent).append("%）")
+                sb.append("\n\n")
+            }
+        }
+
+        // 順番待ち
+        val waiting = queue.filter { it.key !in active.keys }
+            .entries.sortedBy { it.value.optLong("seq") }
+        if (waiting.isNotEmpty()) {
+            sb.append("【順番待ち ${waiting.size}件】\n")
+            waiting.take(50).forEach { (_, j) ->
+                val label = j.optString(DownloadWorker.KEY_TITLE_HINT).ifBlank { j.optString(DownloadWorker.KEY_CID).ifBlank { "作品" } }
+                sb.append("⏳ ").append(label).append("\n")
+                j.optString(DownloadWorker.J_LAST_ERROR).ifBlank { null }?.let {
+                    sb.append("　").append(it).append("\n　→ 少し待って自動で再試行します（「整理」ですぐ再試行）\n")
+                }
+            }
+            if (waiting.size > 50) sb.append("…ほか ${waiting.size - 50}件\n")
+            sb.append("\n")
+        }
+
         val keptCount = JobQueue.keptCount(this)
         if (keptCount > 0) {
             sb.append("📦 途中までのデータを残してある作品: ${keptCount}件（ダウンロードを押し直すと続きから再開）\n\n")
         }
-        val paused = Prefs.paused(this)
-        if (paused) {
-            sb.append("⏸ 一時停止中です。下の「▶ 再開」で続きから再開します。\n\n")
-            JobQueue.all(this).values.forEach { job ->
-                sb.append("⏸ 停止中: ").append(job.optString(DownloadWorker.KEY_TITLE_HINT).ifBlank { job.optString(DownloadWorker.KEY_CID).ifBlank { "作品" } }).append("\n\n")
-            }
-        }
-        val shown = infos.filter { !(paused && it.state == WorkInfo.State.CANCELLED) }
-        if (shown.isEmpty() && (!paused || JobQueue.size(this) == 0)) {
-            sb.append("まだ保存の予約はありません。\n作品をタップ→「ダウンロードする」を押すとここに表示されます。")
-            return sb.toString()
-        }
-        val order = listOf(WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED, WorkInfo.State.FAILED, WorkInfo.State.SUCCEEDED, WorkInfo.State.CANCELLED)
-        for (info in shown.sortedBy { order.indexOf(it.state) }) {
-            val title = info.tags.firstOrNull { it.startsWith(DownloadWorker.TITLE_TAG_PREFIX) }
-                ?.removePrefix(DownloadWorker.TITLE_TAG_PREFIX) ?: "作品"
-            val lastError = Prefs.lastError(this, info.id.toString())
-            when (info.state) {
-                WorkInfo.State.RUNNING -> {
-                    sb.append("⏬ 処理中: ").append(title).append("\n")
-                    sb.append("　").append(info.progress.getString(DownloadWorker.P_TEXT) ?: "準備中…")
-                    val p = info.progress.getInt(DownloadWorker.P_PERCENT, -1)
-                    if (p >= 0) sb.append("（").append(p).append("%）")
-                    sb.append("\n")
-                }
-                WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> {
-                    sb.append("⏳ 待機中: ").append(title).append("\n")
-                    sb.append("　").append(
-                        when {
-                            lastError != null -> "$lastError\n　→ しばらくすると自動で再試行します"
-                            Prefs.wifiOnly(this) -> "Wi-Fi接続を待っています（設定で変更できます）"
-                            else -> "まもなく開始します"
-                        }
-                    ).append("\n")
-                }
-                WorkInfo.State.SUCCEEDED -> sb.append("✅ 完了: ").append(info.outputData.getString(DownloadWorker.OUT_RESULT) ?: title).append("\n")
-                WorkInfo.State.FAILED -> {
-                    sb.append("❌ 失敗: ").append(title).append("\n")
-                    sb.append("　").append(info.outputData.getString(DownloadWorker.OUT_ERROR) ?: "不明なエラー").append("\n")
-                }
-                WorkInfo.State.CANCELLED -> sb.append("⛔ 中止: ").append(title).append("\n")
-            }
+
+        if (failed.isNotEmpty()) {
+            sb.append("【失敗 ${failed.size}件】\n")
+            failed.takeLast(30).reversed().forEach { sb.append("❌ ").append(it.title).append("\n　").append(it.message ?: "").append("\n") }
             sb.append("\n")
+        }
+        if (done > 0) {
+            sb.append("【完了（新しい順・最大30件）】\n")
+            log.filter { it.ok }.takeLast(30).reversed().forEach { sb.append("✅ ").append(it.title).append("\n") }
+        }
+        if (queue.isEmpty() && log.isEmpty() && active.isEmpty()) {
+            sb.append("\nまだ保存の予約はありません。\n作品をタップ→「ダウンロードする」を押すとここに表示されます。")
         }
         return sb.toString()
     }

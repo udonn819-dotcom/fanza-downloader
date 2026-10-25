@@ -80,8 +80,7 @@ object Prefs {
     fun paused(c: Context): Boolean = sp(c).getBoolean("paused", false)
     fun setPaused(c: Context, paused: Boolean) = sp(c).edit().putBoolean("paused", paused).commit()
 
-    // ---- 通知に出す件数（今回まとめて予約した分の 合計・完了・失敗） ----
-    const val ST_TOTAL = "st_total"
+    // ---- 通知に出す件数（今回まとめて予約した分の 完了・失敗。残りは台帳の件数） ----
     const val ST_DONE = "st_done"
     const val ST_FAILED = "st_failed"
 
@@ -95,7 +94,7 @@ object Prefs {
 
     @Synchronized
     fun resetStats(c: Context) {
-        sp(c).edit().putInt(ST_TOTAL, 0).putInt(ST_DONE, 0).putInt(ST_FAILED, 0).commit()
+        sp(c).edit().putInt(ST_DONE, 0).putInt(ST_FAILED, 0).commit()
     }
 
     fun clearDone(c: Context) {
