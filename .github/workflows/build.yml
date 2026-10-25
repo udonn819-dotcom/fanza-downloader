@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,15 +18,12 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Generate Android Project & Source Code
         run: |
           mkdir -p app/src/main/java/com/example/fanzadrive
           mkdir -p app/src/main/res/values
 
-          cat << 'EOF' > settings.gradle
+          cat << 'EOF' | sed 's/^          //' > settings.gradle
           pluginManagement {
               repositories {
                   google()
@@ -45,21 +42,21 @@ jobs:
           include ':app'
           EOF
 
-          cat << 'EOF' > build.gradle
+          cat << 'EOF' | sed 's/^          //' > build.gradle
           plugins {
               id 'com.android.application' version '8.2.0' apply false
               id 'org.jetbrains.kotlin.android' version '1.9.20' apply false
           }
           EOF
 
-          cat << 'EOF' > gradle.properties
+          cat << 'EOF' | sed 's/^          //' > gradle.properties
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
           android.useAndroidX=true
           kotlin.code.style=official
           android.nonTransitiveRClass=true
           EOF
 
-          cat << 'EOF' > app/build.gradle
+          cat << 'EOF' | sed 's/^          //' > app/build.gradle
           plugins {
               id 'com.android.application'
               id 'org.jetbrains.kotlin.android'
@@ -91,7 +88,7 @@ jobs:
           }
           EOF
 
-          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          cat << 'EOF' | sed 's/^          //' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               xmlns:tools="http://schemas.android.com/tools">
@@ -123,7 +120,7 @@ jobs:
           </manifest>
           EOF
 
-          cat << 'EOF' > app/src/main/java/com/example/fanzadrive/MainActivity.kt
+          cat << 'EOF' | sed 's/^          //' > app/src/main/java/com/example/fanzadrive/MainActivity.kt
           package com.example.fanzadrive
 
           import android.Manifest
@@ -298,7 +295,7 @@ jobs:
           }
           EOF
 
-          cat << 'EOF' > app/src/main/java/com/example/fanzadrive/UploadWorker.kt
+          cat << 'EOF' | sed 's/^          //' > app/src/main/java/com/example/fanzadrive/UploadWorker.kt
           package com.example.fanzadrive
 
           import android.app.NotificationChannel
@@ -403,10 +400,8 @@ jobs:
                           .trim()
                       val finalFileName = "$safeTitle.zip"
 
-                      // スマホ本体のDownloadフォルダにもリネーム済みで保存（大容量ファイルでも確実に残るようにする）
                       saveToDownloads(tempFile, finalFileName)
 
-                      // GAS経由でGoogleドライブへ自動送信（約35MB以下の一般的な同人誌に対応）
                       if (gasUrl.isNotBlank() && tempFile.length() < 36 * 1024 * 1024) {
                           val bytes = tempFile.readBytes()
                           val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
@@ -441,4 +436,4 @@ jobs:
                           .build()
                       client.newCall(req).execute().use { res ->
                           val html = res.body?.string() ?: return null
-                          val m = Regex("<meta property=\"og:
+                          val m = Regex("<meta property=\"og:title\" content=\"([^\"]+)\"", RegexOption.IGNORE_CASE).
