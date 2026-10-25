@@ -28,6 +28,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.material.materialswitch.MaterialSwitch
@@ -75,6 +77,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnLibrary).setOnClickListener { webView.loadUrl(LIBRARY_URL) }
         btnBulk = findViewById(R.id.btnBulk)
         btnBulk.setOnClickListener { scanPage(auto = false) }
+        findViewById<Button>(R.id.btnStatus).setOnClickListener { showStatus() }
         findViewById<Button>(R.id.btnReload).setOnClickListener { webView.reload() }
         findViewById<Button>(R.id.btnSettings).setOnClickListener { showSettings() }
 
@@ -143,11 +146,11 @@ class MainActivity : AppCompatActivity() {
         val hint = lastClickTitle.takeIf { recent && (lastClickCid == null || lastClickCid == cid) }
         DownloadWorker.enqueue(this, url, userAgent ?: Http.DESKTOP_UA, referer, contentDisposition, cid, hint)
         val name = hint ?: cid ?: "作品"
-        Toast.makeText(this, "「$name」をバックグラウンドで保存します", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "「$name」をバックグラウンドで保存します（進み具合は「保存状況」で確認できます）", Toast.LENGTH_LONG).show()
     }
 
     /**
-     * 「未保存を一括」。購入済みページでは左の作品一覧を上から順に自動でタップし、
+     * 「一括保存」。購入済みページでは左の作品一覧を上から順に自動でタップし、
      * 右側に出る「ダウンロード」ボタンを押していく。それ以外のページではリンクを探す。
      * 実行中にもう一度押すと停止する。
      */
@@ -222,7 +225,7 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun onBulkDone(checked: Int, skipped: Int, found: Int) = runOnUiThread {
-            btnBulk.text = "未保存を一括"
+            btnBulk.text = "一括保存"
             val msg = "確認完了: ${checked}件を確認、${found}件の保存を開始しました（保存済み${skipped}件はスキップ）"
             if (!bulkAuto || found > 0) Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
             if (!bulkAuto && checked > 0 && found == 0) {
@@ -385,6 +388,79 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+    }
+
+    /** 「保存状況」: 予約した作品が今どうなっているか（進み具合・エラー理由）を一覧表示する */
+    private fun showStatus() {
+        val text = TextView(this).apply {
+            setPadding(48, 24, 48, 24)
+            textSize = 13f
+            setTextIsSelectable(true)
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(text) }
+        val live = WorkManager.getInstance(this).getWorkInfosByTagLiveData(DownloadWorker.TAG)
+        val observer = androidx.lifecycle.Observer<List<WorkInfo>> { infos -> text.text = statusText(infos) }
+        live.observe(this, observer)
+        AlertDialog.Builder(this)
+            .setTitle("保存状況")
+            .setView(scroll)
+            .setPositiveButton("閉じる", null)
+            .setNeutralButton("完了・失敗の表示を消す") { _, _ -> WorkManager.getInstance(this).pruneWork() }
+            .setOnDismissListener { live.removeObserver(observer) }
+            .show()
+    }
+
+    private fun statusText(infos: List<WorkInfo>): String {
+        val sb = StringBuilder()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            sb.append("⚠ 通知が許可されていません。スマホの設定→アプリ→FANZA Drive保存→通知 をONにすると、進み具合や完了が通知で分かります。\n\n")
+        }
+        sb.append("保存先: ").append(
+            when {
+                !Prefs.driveEnabled(this) -> "本体の Download/FANZA（ドライブ未設定）"
+                Prefs.saveLocal(this) -> "Googleドライブ ＋ 本体の Download/FANZA"
+                else -> "Googleドライブ"
+            }
+        ).append("\n\n")
+        if (infos.isEmpty()) {
+            sb.append("まだ保存の予約はありません。\n作品をタップ→「ダウンロードする」を押すとここに表示されます。")
+            return sb.toString()
+        }
+        val order = listOf(WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED, WorkInfo.State.FAILED, WorkInfo.State.SUCCEEDED, WorkInfo.State.CANCELLED)
+        for (info in infos.sortedBy { order.indexOf(it.state) }) {
+            val title = info.tags.firstOrNull { it.startsWith(DownloadWorker.TITLE_TAG_PREFIX) }
+                ?.removePrefix(DownloadWorker.TITLE_TAG_PREFIX) ?: "作品"
+            val lastError = Prefs.lastError(this, info.id.toString())
+            when (info.state) {
+                WorkInfo.State.RUNNING -> {
+                    sb.append("⏬ 処理中: ").append(title).append("\n")
+                    sb.append("　").append(info.progress.getString(DownloadWorker.P_TEXT) ?: "準備中…")
+                    val p = info.progress.getInt(DownloadWorker.P_PERCENT, -1)
+                    if (p >= 0) sb.append("（").append(p).append("%）")
+                    sb.append("\n")
+                }
+                WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> {
+                    sb.append("⏳ 待機中: ").append(title).append("\n")
+                    sb.append("　").append(
+                        when {
+                            lastError != null -> "$lastError\n　→ しばらくすると自動で再試行します"
+                            Prefs.wifiOnly(this) -> "Wi-Fi接続を待っています（設定で変更できます）"
+                            else -> "まもなく開始します"
+                        }
+                    ).append("\n")
+                }
+                WorkInfo.State.SUCCEEDED -> sb.append("✅ 完了: ").append(info.outputData.getString(DownloadWorker.OUT_RESULT) ?: title).append("\n")
+                WorkInfo.State.FAILED -> {
+                    sb.append("❌ 失敗: ").append(title).append("\n")
+                    sb.append("　").append(info.outputData.getString(DownloadWorker.OUT_ERROR) ?: "不明なエラー").append("\n")
+                }
+                WorkInfo.State.CANCELLED -> sb.append("⛔ 中止: ").append(title).append("\n")
+            }
+            sb.append("\n")
+        }
+        return sb.toString()
     }
 
     private fun showSettings() {

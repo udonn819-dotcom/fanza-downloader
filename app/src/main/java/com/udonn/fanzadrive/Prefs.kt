@@ -69,6 +69,13 @@ object Prefs {
 
     fun doneCount(c: Context): Int = sp(c).getStringSet(KEY_DONE, emptySet())!!.count { !it.startsWith("t:") }
 
+    /** 再試行待ちになった理由（「保存状況」画面に表示する） */
+    private fun errSp(c: Context) = c.getSharedPreferences("work_errors", Context.MODE_PRIVATE)
+    fun lastError(c: Context, workId: String): String? = errSp(c).getString(workId, null)
+    fun setLastError(c: Context, workId: String, message: String?) {
+        if (message == null) errSp(c).edit().remove(workId).apply() else errSp(c).edit().putString(workId, message).apply()
+    }
+
     fun clearDone(c: Context) {
         sp(c).edit().remove(KEY_DONE).apply()
     }

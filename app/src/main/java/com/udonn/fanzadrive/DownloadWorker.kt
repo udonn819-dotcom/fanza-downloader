@@ -49,6 +49,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         val percent = if (total > 0) ((done * 100) / total).toInt() else null
         val sizeText = if (total > 0) "${mb(done)} / ${mb(total)}" else mb(done)
         runCatching { setForeground(foregroundInfo("$text  $sizeText", percent)) }
+        runCatching { setProgress(workDataOf(P_TEXT to "$text  $sizeText", P_PERCENT to (percent ?: -1))) }
     }
 
     /** suspend できない場所（アップロード中のコールバック）から通知を更新する */
@@ -58,6 +59,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         lastNotify = now
         val percent = if (total > 0) ((done * 100) / total).toInt() else null
         runCatching { setForegroundAsync(foregroundInfo("$text  ${mb(done)} / ${mb(total)}", percent)) }
+        runCatching { setProgressAsync(workDataOf(P_TEXT to "$text  ${mb(done)} / ${mb(total)}", P_PERCENT to (percent ?: -1))) }
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -72,21 +74,29 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             Prefs.markDone(ctx, historyKey)
             inputData.getString(KEY_TITLE_HINT)?.takeIf { it.isNotBlank() }?.let { Prefs.markDone(ctx, "t:$it") }
             jobDir.deleteRecursively()
+            Prefs.setLastError(ctx, id.toString(), null)
             Notifier.result(ctx, progressId + 1, "保存しました", name, true)
-            Result.success()
+            Result.success(workDataOf(OUT_RESULT to name))
         } catch (e: PermanentException) {
-            jobDir.deleteRecursively()
-            Notifier.result(ctx, progressId + 1, "保存できませんでした: $label", e.message ?: "", false)
-            Result.failure()
+            fail(jobDir, e.message ?: "不明なエラー")
         } catch (e: IOException) {
             if (runAttemptCount < MAX_ATTEMPTS) {
+                // 少し待って自動で再試行。理由は「保存状況」画面で確認できる
+                Prefs.setLastError(ctx, id.toString(), "通信エラー（${runAttemptCount + 1}回目）: ${e.message}")
                 Result.retry()
             } else {
-                jobDir.deleteRecursively()
-                Notifier.result(ctx, progressId + 1, "保存できませんでした: $label", "通信エラー: ${e.message}", false)
-                Result.failure()
+                fail(jobDir, "通信エラー: ${e.message}")
             }
+        } catch (e: Exception) {
+            fail(jobDir, "予期しないエラー: ${e.javaClass.simpleName} ${e.message ?: ""}")
         }
+    }
+
+    private fun fail(jobDir: File, message: String): Result {
+        jobDir.deleteRecursively()
+        Prefs.setLastError(ctx, id.toString(), null)
+        Notifier.result(ctx, progressId + 1, "保存できませんでした: $label", message, false)
+        return Result.failure(workDataOf(OUT_ERROR to message))
     }
 
     /** 途中で失敗して再試行になっても、済んだ工程はやり直さないよう状態をファイルに残す */
@@ -255,6 +265,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                 .setConstraints(constraints)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .addTag(TAG)
+                .addTag(TITLE_TAG_PREFIX + (titleHint?.takeIf { it.isNotBlank() } ?: cid ?: url.substringBefore('?').takeLast(60)))
                 .setInputData(
                     workDataOf(
                         KEY_URL to url,
@@ -271,5 +282,10 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         }
 
         const val TAG = "fanza_download"
+        const val TITLE_TAG_PREFIX = "title:"
+        const val P_TEXT = "progress_text"
+        const val P_PERCENT = "progress_percent"
+        const val OUT_RESULT = "result"
+        const val OUT_ERROR = "error"
     }
 }

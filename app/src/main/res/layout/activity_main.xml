@@ -17,6 +17,8 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:paddingHorizontal="2dp"
+            android:textSize="12sp"
             android:text="購入済み" />
 
         <Button
@@ -25,7 +27,19 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="未保存を一括" />
+            android:paddingHorizontal="2dp"
+            android:textSize="12sp"
+            android:text="一括保存" />
+
+        <Button
+            android:id="@+id/btnStatus"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:paddingHorizontal="2dp"
+            android:textSize="12sp"
+            android:text="保存状況" />
 
         <Button
             android:id="@+id/btnReload"
@@ -33,6 +47,8 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:paddingHorizontal="2dp"
+            android:textSize="12sp"
             android:text="再読込" />
 
         <Button
@@ -41,6 +57,8 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
+            android:paddingHorizontal="2dp"
+            android:textSize="12sp"
             android:text="設定" />
     </LinearLayout>
 
