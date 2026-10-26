@@ -43,12 +43,13 @@ jobs:
           ./gradlew assembleRelease --no-daemon --stacktrace
           mkdir -p dist
           cp app/build/outputs/apk/release/app-release.apk "dist/FanzaDrive-v1.0.${{ github.run_number }}.apk"
+          (cd pc-extension && zip -r "../dist/FanzaDrive-PC拡張機能.zip" .)
 
       - name: Upload APK (Actions artifact)
         uses: actions/upload-artifact@v4
         with:
           name: FanzaDrive-apk
-          path: dist/*.apk
+          path: dist/*
 
       # スマホから直接ダウンロードしやすいよう「Releases」にもAPKを置く
       - name: Publish to Releases
@@ -58,7 +59,8 @@ jobs:
           name: FANZA Drive保存 v1.0.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref != 'refs/heads/main' }}
-          files: dist/*.apk
+          files: dist/*
           body: |
             ブランチ: ${{ github.ref_name }}
             スマホでこのページを開き、下の「Assets」から .apk をタップしてインストールしてください。
+            パソコンで保存したい場合は「FanzaDrive-PC拡張機能.zip」をダウンロードしてください（使い方はREADMEの「パソコンで保存する」）。

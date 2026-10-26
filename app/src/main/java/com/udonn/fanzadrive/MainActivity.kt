@@ -580,6 +580,67 @@ class MainActivity : AppCompatActivity() {
         return sb.toString()
     }
 
+    /**
+     * 「PCへ引き継ぐ」: スマホで保存済みの作品の一覧をファイルに書き出す。
+     * PCの拡張機能で読み込むと、保存済みの作品を飛ばして残りだけをPCに保存できる。
+     * Download/FANZA に保存し、Googleドライブ連携中ならドライブの「FANZA同人」フォルダにも置く。
+     */
+    private fun exportForPc(info: TextView) {
+        info.text = "書き出し中…"
+        val app = applicationContext
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val queue = JobQueue.all(app).values
+                    val json = org.json.JSONObject()
+                        .put("app", "FanzaDrive")
+                        .put("version", 1)
+                        .put("exported_at", System.currentTimeMillis())
+                        .put("done_titles", JSONArray(Prefs.doneTitles(app)))
+                        .put("done_cids", JSONArray(Prefs.doneCids(app)))
+                        .put("pending_titles", JSONArray(queue.map { it.optString(DownloadWorker.KEY_TITLE_HINT) }.filter { it.isNotBlank() }))
+                    val bytes = json.toString(1).toByteArray()
+                    val name = "FANZA_PC引き継ぎ_" + java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.US).format(java.util.Date()) + ".json"
+                    val values = android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                        put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/json")
+                        put(android.provider.MediaStore.Downloads.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FANZA")
+                    }
+                    val uri = contentResolver.insert(
+                        android.provider.MediaStore.Downloads.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY), values,
+                    ) ?: error("保存できませんでした")
+                    contentResolver.openOutputStream(uri)!!.use { it.write(bytes) }
+                    var where = "スマホの Download/FANZA/$name"
+                    if (Prefs.driveEnabled(app)) {
+                        val tmp = java.io.File(cacheDir, name).apply { writeBytes(bytes) }
+                        runCatching {
+                            DriveUploader.create(app).upload(tmp, name, "application/json", null, {}, { false }) { _, _ -> }
+                            where += "\nGoogleドライブの「FANZA同人」フォルダ/$name"
+                        }
+                        tmp.delete()
+                    }
+                    Triple(where, Prefs.doneTitles(app).size, queue.size)
+                }
+            }
+            result.onSuccess { (where, doneCount, pending) ->
+                info.text = "書き出しました（保存済み ${doneCount}件）:\n$where"
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("PCへ引き継ぐファイルを作りました")
+                    .setMessage(
+                        "保存場所:\n$where\n\nPCのChrome拡張機能「FANZA同人 一括保存」でこのファイルを読み込むと、スマホで保存済みの ${doneCount}件 を飛ばして残りだけをPCに保存します。\n\n" +
+                            "スマホの保存待ち（${pending}件）は、二重にダウンロードしないよう一時停止するのがおすすめです。"
+                    )
+                    .setPositiveButton("スマホ側を一時停止") { _, _ ->
+                        DownloadWorker.pauseAll(this@MainActivity)
+                        updateStatusButton()
+                    }
+                    .setNeutralButton("保存待ちを取り消す") { _, _ -> DownloadWorker.cancelAll(this@MainActivity) }
+                    .setNegativeButton("そのまま", null)
+                    .show()
+            }.onFailure { info.text = "書き出しに失敗しました: ${it.message}" }
+        }
+    }
+
     private fun showSettings() {
         val v = layoutInflater.inflate(R.layout.dialog_settings, null)
         val radioApi = v.findViewById<RadioButton>(R.id.radioApi)
@@ -622,6 +683,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
         v.findViewById<Button>(R.id.btnDumpPage).setOnClickListener { dumpPage(info) }
+        v.findViewById<Button>(R.id.btnExportPc).setOnClickListener { exportForPc(info) }
+        v.findViewById<Button>(R.id.btnCancelAll).setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("保存待ちをすべて取り消しますか？")
+                .setMessage("スマホで保存待ちになっている ${JobQueue.size(this)}件 を取り消します（保存済みの作品はそのままです）。PCで続きを保存する場合などに使ってください。")
+                .setPositiveButton("取り消す") { _, _ ->
+                    DownloadWorker.cancelAll(this)
+                    info.text = "保存待ちをすべて取り消しました"
+                }
+                .setNegativeButton("やめる", null)
+                .show()
+        }
         v.findViewById<Button>(R.id.btnBattery).apply {
             text = if (isBatteryExempt()) "バッテリー最適化: 解除済み ✓" else "バッテリー最適化を解除（止まりにくくする）"
             setOnClickListener { requestBatteryExemption() }

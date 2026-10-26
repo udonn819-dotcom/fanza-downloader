@@ -67,6 +67,10 @@ object Prefs {
     fun doneTitles(c: Context): List<String> =
         sp(c).getStringSet(KEY_DONE, emptySet())!!.filter { it.startsWith("t:") }.map { it.removePrefix("t:") }
 
+    /** 保存済みとして記録している作品ID（d_123456 など） */
+    fun doneCids(c: Context): List<String> =
+        sp(c).getStringSet(KEY_DONE, emptySet())!!.filter { Regex("^d_[a-z0-9]+$").matches(it) }
+
     fun doneCount(c: Context): Int = sp(c).getStringSet(KEY_DONE, emptySet())!!.count { !it.startsWith("t:") }
 
     /** 再試行待ちになった理由（「保存状況」画面に表示する） */

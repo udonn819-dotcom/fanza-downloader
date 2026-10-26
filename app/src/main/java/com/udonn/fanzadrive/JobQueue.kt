@@ -37,6 +37,13 @@ object JobQueue {
 
     fun size(c: Context): Int = sp(c).all.size
 
+    /** 保存待ちをすべて取り消す（途中のファイルも削除） */
+    @Synchronized
+    fun clearAll(c: Context) {
+        sp(c).all.keys.forEach { jobDir(c, it).deleteRecursively() }
+        sp(c).edit().clear().commit()
+    }
+
     // ---- 失敗したが途中までのデータを残してある作品（押し直すと続きから再開） ----
     private const val KEPT = "job_kept"
     private const val KEEP_DAYS = 14L

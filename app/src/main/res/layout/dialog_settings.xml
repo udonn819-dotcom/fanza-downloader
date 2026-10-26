@@ -110,6 +110,21 @@
             android:text="購入済みページを開いたら未保存作品を自動で保存" />
 
         <Button
+            android:id="@+id/btnExportPc"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="PCへ引き継ぐ（保存済みリストを書き出す）" />
+
+        <Button
+            android:id="@+id/btnCancelAll"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="スマホの保存待ちをすべて取り消す" />
+
+        <Button
             android:id="@+id/btnBattery"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"

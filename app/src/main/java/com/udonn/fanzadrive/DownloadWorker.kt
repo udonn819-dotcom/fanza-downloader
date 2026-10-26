@@ -498,6 +498,13 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             ensureRunner(context)
         }
 
+        /** 保存待ちをすべて取り消す（PCへ引き継いだときなど） */
+        fun cancelAll(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(RUNNER)
+            JobQueue.clearAll(context)
+            Notifier.clearFinished(context)
+        }
+
         /** 通信エラーで待機中の作品を、待たずにすぐ再試行する */
         fun retryNow(context: Context) {
             JobQueue.all(context).forEach { (k, j) ->
