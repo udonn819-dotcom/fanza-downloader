@@ -117,7 +117,7 @@ Google Cloud への登録をしたくない場合はこちら。**Google Apps Sc
 
 ### 入れ方（最初に1回だけ）
 
-1. パソコンでこのリポジトリの **[Releases](../../releases)** を開き、最新版の **`FanzaDrive-PC拡張機能.zip`** をダウンロード。
+1. パソコンでこのリポジトリの **[Releases](../../releases)** を開き、最新版の **`FanzaDrive-PC.zip`** をダウンロード。
 2. ダウンロードしたzipを右クリック →「**すべて展開**」。できたフォルダは消さずに置いておきます（例: ドキュメントの中など）。
 3. Chromeのアドレス欄に `chrome://extensions` と入力して開く（Edgeは `edge://extensions`）。
 4. 右上（Edgeは左下）の「**デベロッパーモード**」をONにする。
