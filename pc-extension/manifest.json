@@ -1,18 +1,36 @@
 {
   "manifest_version": 3,
   "name": "FANZA同人 一括保存（PC）",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "FANZA同人の購入済み作品を、作品タイトルのファイル名でパソコンに一括保存します。",
-  "permissions": ["downloads", "storage"],
-  "host_permissions": ["https://*.dmm.co.jp/*"],
-  "background": { "service_worker": "background.js" },
+  "permissions": [
+    "downloads",
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://*.dmm.co.jp/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
-      "matches": ["https://www.dmm.co.jp/dc/doujin/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://*.dmm.co.jp/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_popup": "popup.html", "default_title": "FANZA同人 一括保存" },
-  "icons": { "128": "icon128.png" }
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "FANZA同人 一括保存"
+  },
+  "icons": {
+    "128": "icon128.png"
+  }
 }

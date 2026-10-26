@@ -2,15 +2,14 @@
 // 左の作品一覧を上から順に選び、右側に出る「ダウンロードする」を押していく。
 // 押す直前に作品タイトルを裏方へ伝え、ファイル名に使ってもらう。
 (() => {
+  // 二重に読み込まれても1回分だけ動くようにする
+  if (window.__fanzaBulkLoaded) return;
+  window.__fanzaBulkLoaded = true;
+
   // 作品には必ず「コミック」「CG」「ボイス」などの分類ラベルが付いているので、それを目印にする
   const CAT = /^(コミック|CG|ボイス|ゲーム|動画|音声|ASMR|写真集?|小説|ノベル|その他|ツール|イラスト|マンガ|アニメ|単話)(・AI)?$/;
   const txt = el => ((el && (el.innerText || el.textContent)) || '').trim();
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-  function isLibrary() {
-    if (location.href.indexOf('mylibrary') >= 0) return true;
-    return [...document.querySelectorAll('body *')].some(e => e.children.length === 0 && /^購入済み(作品|商品)/.test(txt(e)));
-  }
 
   // 画面左側の作品一覧にある分類ラベル（一番多い横位置のものだけ＝右側のおすすめ欄を除外）
   function leftLabels() {
@@ -150,9 +149,11 @@
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'start') {
-      const ok = isLibrary() && findItems().length > 0;
+      // 購入済みページかどうかは、作品一覧（分類ラベル付きの並び）が見つかるかで判断する
+      const count = findItems().length;
+      const ok = running || count > 0;
       if (ok && !running) run(msg.maxParallel || 3);
-      sendResponse({ ok, running: true });
+      sendResponse({ ok, count });
     } else if (msg.type === 'stop') {
       stopReq = true;
       sendResponse({ ok: true });

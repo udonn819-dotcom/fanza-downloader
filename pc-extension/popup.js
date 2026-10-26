@@ -1,4 +1,3 @@
-const LIBRARY_URL = 'https://www.dmm.co.jp/dc/doujin/-/mylibrary/';
 const $ = id => document.getElementById(id);
 
 async function activeTab() {
@@ -14,18 +13,36 @@ async function refresh() {
   $('status').textContent = text;
 }
 
+function showMessage(text) {
+  $('message').textContent = text;
+}
+
+/** 開いているタブで拡張機能の処理を動かす（拡張機能を入れる前から開いていたタブでも動くように、必要ならその場で読み込む） */
+async function sendToTab(tab, msg) {
+  let res = await chrome.tabs.sendMessage(tab.id, msg).catch(() => null);
+  if (!res) {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }).catch(() => null);
+    res = await chrome.tabs.sendMessage(tab.id, msg).catch(() => null);
+  }
+  return res;
+}
+
 $('start').onclick = async () => {
+  showMessage('');
   const tab = await activeTab();
   const maxParallel = Number($('parallel').value);
   chrome.storage.local.set({ parallel: maxParallel });
-  let res = null;
-  if (tab && /^https:\/\/www\.dmm\.co\.jp\/dc\/doujin\//.test(tab.url || '')) {
-    res = await chrome.tabs.sendMessage(tab.id, { type: 'start', maxParallel }).catch(() => null);
+  if (!tab || !/^https:\/\/[^/]*dmm\.co\.jp\//.test(tab.url || '')) {
+    showMessage('FANZA同人の「購入済み作品」ページを開いた状態で押してください。');
+    return;
   }
-  if (!res || !res.ok) {
-    if (confirm('FANZA同人の「購入済み作品」ページで押してください。\n今すぐ購入済みページを開きますか？（開いたら、もう一度このボタンを押してください）')) {
-      chrome.tabs.create({ url: LIBRARY_URL });
-    }
+  const res = await sendToTab(tab, { type: 'start', maxParallel });
+  if (!res) {
+    showMessage('このページでは動かせませんでした。ページを再読み込み（F5）してから、もう一度押してください。');
+  } else if (!res.ok) {
+    showMessage('このページに作品一覧が見つかりませんでした。FANZA同人の「購入済み作品」ページ（左に購入作品が並んでいる画面）で押してください。');
+  } else {
+    showMessage(`開始しました（作品 ${res.count || ''}件）。このまま待つと自動で進みます。`);
   }
   refresh();
 };
@@ -33,6 +50,7 @@ $('start').onclick = async () => {
 $('stop').onclick = async () => {
   const tab = await activeTab();
   if (tab) await chrome.tabs.sendMessage(tab.id, { type: 'stop' }).catch(() => null);
+  showMessage('停止しました。');
   refresh();
 };
 
